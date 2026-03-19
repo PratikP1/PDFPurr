@@ -58,10 +58,14 @@ jobs:
 
       - name: Install Tesseract (Windows)
         if: runner.os == 'Windows'
-        run: choco install tesseract --no-progress -y
+        run: |
+          choco install tesseract --no-progress -y
+          echo "C:\Program Files\Tesseract-OCR" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
       - name: Verify Tesseract
-        run: tesseract --version || echo "Tesseract not in PATH (Windows may need restart)"
+        continue-on-error: true
+        shell: bash
+        run: tesseract --version || echo "Tesseract not in PATH"
 
       - name: Run tests
         # working-directory at repo root
