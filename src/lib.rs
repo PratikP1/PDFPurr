@@ -68,11 +68,14 @@ pub mod accessibility;
 pub mod content;
 pub mod core;
 pub mod document;
+
+// OCR module — types always available, engine impls behind feature flags
 pub mod encryption;
 pub mod error;
 pub mod fonts;
 pub mod forms;
 pub mod images;
+pub mod ocr;
 pub mod page_builder;
 pub mod parser;
 pub mod signatures;

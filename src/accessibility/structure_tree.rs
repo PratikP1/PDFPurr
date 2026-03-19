@@ -72,6 +72,23 @@ pub enum StandardRole {
     Form,
     /// Ruby annotation.
     Ruby,
+    // --- PDF/UA-2 (ISO 14289-2:2024) additions ---
+    /// Partial document (PDF 2.0 / PDF/UA-2).
+    DocumentFragment,
+    /// Footnote or endnote (PDF/UA-2, replaces Note).
+    FENote,
+    /// Note (PDF/UA-1, retained for backward compatibility).
+    Note,
+    /// Emphasis (inline, PDF/UA-2).
+    Em,
+    /// Strong emphasis (inline, PDF/UA-2).
+    Strong,
+    /// Sidebar content (PDF/UA-2).
+    Aside,
+    /// Document title element (PDF/UA-2).
+    Title,
+    /// Subscript (PDF/UA-2).
+    Sub,
     /// Non-standard or unknown role.
     NonStandard(String),
 }
@@ -116,6 +133,15 @@ impl StandardRole {
             "Formula" => StandardRole::Formula,
             "Form" => StandardRole::Form,
             "Ruby" => StandardRole::Ruby,
+            // PDF/UA-2 (ISO 14289-2:2024)
+            "DocumentFragment" => StandardRole::DocumentFragment,
+            "FENote" => StandardRole::FENote,
+            "Note" => StandardRole::Note,
+            "Em" => StandardRole::Em,
+            "Strong" => StandardRole::Strong,
+            "Aside" => StandardRole::Aside,
+            "Title" => StandardRole::Title,
+            "Sub" => StandardRole::Sub,
             other => StandardRole::NonStandard(other.to_string()),
         }
     }
@@ -141,6 +167,11 @@ impl StandardRole {
                 | StandardRole::TBody
                 | StandardRole::TFoot
                 | StandardRole::Figure
+                | StandardRole::DocumentFragment
+                | StandardRole::FENote
+                | StandardRole::Note
+                | StandardRole::Aside
+                | StandardRole::Title
         )
     }
 
@@ -154,6 +185,9 @@ impl StandardRole {
                 | StandardRole::Lbl
                 | StandardRole::Formula
                 | StandardRole::Ruby
+                | StandardRole::Em
+                | StandardRole::Strong
+                | StandardRole::Sub
         )
     }
 }
@@ -583,5 +617,93 @@ mod tests {
         assert_eq!(elems[0].struct_type, "P");
         assert_eq!(elems[1].struct_type, "Span");
         assert_eq!(elems[2].struct_type, "Link");
+    }
+
+    // --- PDF/UA-2 (ISO 14289-2:2024) structure elements ---
+
+    #[test]
+    fn pdfua2_document_fragment_role() {
+        assert_eq!(
+            StandardRole::from_name("DocumentFragment"),
+            StandardRole::DocumentFragment
+        );
+        assert!(StandardRole::DocumentFragment.is_block());
+    }
+
+    #[test]
+    fn pdfua2_fenote_role() {
+        assert_eq!(StandardRole::from_name("FENote"), StandardRole::FENote);
+        assert!(StandardRole::FENote.is_block());
+    }
+
+    #[test]
+    fn pdfua2_em_role() {
+        assert_eq!(StandardRole::from_name("Em"), StandardRole::Em);
+        assert!(StandardRole::Em.is_inline());
+    }
+
+    #[test]
+    fn pdfua2_strong_role() {
+        assert_eq!(StandardRole::from_name("Strong"), StandardRole::Strong);
+        assert!(StandardRole::Strong.is_inline());
+    }
+
+    #[test]
+    fn pdfua2_aside_role() {
+        assert_eq!(StandardRole::from_name("Aside"), StandardRole::Aside);
+        assert!(StandardRole::Aside.is_block());
+    }
+
+    #[test]
+    fn pdfua2_title_role() {
+        assert_eq!(StandardRole::from_name("Title"), StandardRole::Title);
+        assert!(StandardRole::Title.is_block());
+    }
+
+    #[test]
+    fn pdfua2_sub_role() {
+        assert_eq!(StandardRole::from_name("Sub"), StandardRole::Sub);
+        assert!(StandardRole::Sub.is_inline());
+    }
+
+    #[test]
+    fn pdfua2_note_is_recognized() {
+        // PDF/UA-1 Note element should still be recognized (FENote replaces it in UA-2)
+        assert_eq!(StandardRole::from_name("Note"), StandardRole::Note);
+        assert!(StandardRole::Note.is_block());
+    }
+
+    #[test]
+    fn pdfua2_elements_in_structure_tree() {
+        let em_elem =
+            Object::Dictionary(make_dict(vec![("S", Object::Name(PdfName::new("Em")))]));
+        let strong_elem =
+            Object::Dictionary(make_dict(vec![("S", Object::Name(PdfName::new("Strong")))]));
+        let fenote_elem =
+            Object::Dictionary(make_dict(vec![("S", Object::Name(PdfName::new("FENote")))]));
+
+        let root = make_dict(vec![(
+            "K",
+            Object::Array(vec![
+                Object::Integer(1),
+                Object::Integer(2),
+                Object::Integer(3),
+            ]),
+        )]);
+
+        let resolve = |obj: &Object| -> Option<&Object> {
+            match obj {
+                Object::Integer(1) => Some(&em_elem),
+                Object::Integer(2) => Some(&strong_elem),
+                Object::Integer(3) => Some(&fenote_elem),
+                _ => None,
+            }
+        };
+
+        let tree = StructTree::from_dict(&root, &resolve);
+        assert_eq!(tree.children.len(), 3);
+        assert_eq!(tree.children[0].role, StandardRole::Em);
+        assert_eq!(tree.children[1].role, StandardRole::Strong);
+        assert_eq!(tree.children[2].role, StandardRole::FENote);
     }
 }

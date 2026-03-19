@@ -111,6 +111,15 @@ impl ContentStreamBuilder {
         self
     }
 
+    /// Sets the text rendering mode (`Tr`).
+    ///
+    /// Mode 0 = fill, 1 = stroke, 2 = fill+stroke, 3 = invisible,
+    /// 4-7 = same with clipping. Mode 3 is used for OCR invisible text.
+    pub fn set_text_rendering_mode(&mut self, mode: u8) -> &mut Self {
+        self.buf.push_str(&format!("{} Tr\n", mode));
+        self
+    }
+
     /// Sets the text matrix (`Tm`).
     pub fn set_text_matrix(&mut self, a: f64, b: f64, c: f64, d: f64, e: f64, f: f64) -> &mut Self {
         write_number(&mut self.buf, a);
@@ -628,5 +637,19 @@ mod tests {
             b.set_font("F#1", 12.0);
         });
         assert_eq!(data, b"/F#231 12 Tf\n");
+    }
+
+    #[test]
+    fn builder_text_rendering_mode() {
+        let data = build(|b| {
+            b.begin_text()
+                .set_text_rendering_mode(3)
+                .set_font("F1", 12.0)
+                .move_to(100.0, 700.0)
+                .show_text("invisible")
+                .end_text();
+        });
+        // Mode 3 = invisible (neither fill nor stroke)
+        assert!(data.windows(4).any(|w| w == b"3 Tr"));
     }
 }

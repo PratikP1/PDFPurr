@@ -519,28 +519,11 @@ impl<'a> Renderer<'a> {
                     }
                 }
             }
-            "w" => {
-                if let Some(w) = operands.first().and_then(|o| obj_f64(o)) {
-                    state.state_mut().line_width = w;
-                }
-            }
-            "J" => {
-                if let Some(&Object::Integer(v)) = operands.first() {
-                    state.state_mut().line_cap = *v as u8;
-                }
-            }
-            "j" => {
-                if let Some(&Object::Integer(v)) = operands.first() {
-                    state.state_mut().line_join = *v as u8;
-                }
-            }
-            "M" => {
-                if let Some(m) = operands.first().and_then(|o| obj_f64(o)) {
-                    state.state_mut().miter_limit = m;
-                }
-            }
+            "w" => set_state_f64(operands, state, |s, v| s.line_width = v),
+            "J" => set_state_u8(operands, state, |s, v| s.line_cap = v),
+            "j" => set_state_u8(operands, state, |s, v| s.line_join = v),
+            "M" => set_state_f64(operands, state, |s, v| s.miter_limit = v),
             "d" => {
-                // Dash pattern: [array] phase
                 if operands.len() == 2 {
                     if let Some(arr) = operands[0].as_array() {
                         let dash: Vec<f32> = arr.iter().filter_map(obj_f32).collect();
@@ -552,7 +535,6 @@ impl<'a> Renderer<'a> {
                 }
             }
             "gs" => {
-                // ExtGState: look up name in /Resources /ExtGState
                 if let Some(name) = operands.first().and_then(|o| o.as_name()) {
                     self.handle_gs(name, state, page_dict, pixmap);
                 }
@@ -1823,6 +1805,27 @@ impl<'a> Renderer<'a> {
 /// Returns (buffer, count) where count is the number of numeric operands found.
 /// Avoids heap allocation for the common case (1–4 components).
 /// Sets a text state field from the first operand, if it's a valid f64.
+/// Sets a text state field from the first operand, if it's a valid f64.
+/// Sets a graphics state f64 field from the first operand.
+fn set_state_f64<F>(operands: &[&Object], state: &mut RenderStateStack, setter: F)
+where
+    F: FnOnce(&mut super::graphics::RenderState, f64),
+{
+    if let Some(v) = operands.first().and_then(|o| obj_f64(o)) {
+        setter(state.state_mut(), v);
+    }
+}
+
+/// Sets a graphics state u8 field from the first integer operand.
+fn set_state_u8<F>(operands: &[&Object], state: &mut RenderStateStack, setter: F)
+where
+    F: FnOnce(&mut super::graphics::RenderState, u8),
+{
+    if let Some(&Object::Integer(v)) = operands.first() {
+        setter(state.state_mut(), *v as u8);
+    }
+}
+
 /// Sets a text state field from the first operand, if it's a valid f64.
 fn set_text_f64<F>(operands: &[&Object], state: &mut RenderStateStack, setter: F)
 where

@@ -62,6 +62,7 @@ pub fn validate_pdf_ua(tree: &StructTree) -> AccessibilityReport {
         check_figure_alt_text(tree),
         check_heading_order(tree),
         check_table_headers(tree),
+        check_pdfua2_fenote(tree),
     ];
 
     AccessibilityReport { checks }
@@ -182,6 +183,33 @@ fn check_table_headers(tree: &StructTree) -> AccessibilityCheck {
         description: "Tables must contain header cells (TH)",
         passed: details.is_empty(),
         details,
+    }
+}
+
+/// Check 6 (PDF/UA-2): Note elements should use FENote instead.
+///
+/// PDF/UA-2 (ISO 14289-2:2024) replaces the `Note` structure element
+/// with `FENote` (footnote/endnote). Documents using `Note` are flagged
+/// as not conforming to PDF/UA-2.
+fn check_pdfua2_fenote(tree: &StructTree) -> AccessibilityCheck {
+    let elements = tree.iter_elements();
+    let deprecated_notes: Vec<String> = elements
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.role == StandardRole::Note)
+        .map(|(i, _)| {
+            format!(
+                "Element #{} uses deprecated Note; use FENote for PDF/UA-2",
+                i + 1
+            )
+        })
+        .collect();
+
+    AccessibilityCheck {
+        id: "pdfua2-fenote",
+        description: "PDF/UA-2: Use FENote instead of deprecated Note element",
+        passed: deprecated_notes.is_empty(),
+        details: deprecated_notes,
     }
 }
 
@@ -430,8 +458,8 @@ mod tests {
 
         let report = validate_pdf_ua(&tree);
         assert!(report.is_compliant());
-        assert_eq!(report.passed_count(), 5);
-        assert_eq!(report.total_checks(), 5);
+        assert_eq!(report.passed_count(), 6);
+        assert_eq!(report.total_checks(), 6);
         assert!(report.failures().is_empty());
     }
 
@@ -449,6 +477,70 @@ mod tests {
             .find(|c| c.id == "table-headers")
             .unwrap();
         assert!(th.passed);
+    }
+
+    // --- PDF/UA-2 validation checks ---
+
+    #[test]
+    fn pdfua2_note_deprecated_warning() {
+        let tree = StructTree {
+            role_map: RoleMap::new(),
+            children: vec![make_elem(
+                "Document",
+                vec![make_elem("P", vec![]), make_elem("Note", vec![])],
+            )],
+            lang: Some("en".into()),
+        };
+        let report = validate_pdf_ua(&tree);
+        let note_check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "pdfua2-fenote")
+            .unwrap();
+        assert!(!note_check.passed);
+        assert!(note_check.details[0].contains("FENote"));
+    }
+
+    #[test]
+    fn pdfua2_fenote_passes() {
+        let tree = StructTree {
+            role_map: RoleMap::new(),
+            children: vec![make_elem(
+                "Document",
+                vec![make_elem("P", vec![]), make_elem("FENote", vec![])],
+            )],
+            lang: Some("en".into()),
+        };
+        let report = validate_pdf_ua(&tree);
+        let note_check = report
+            .checks
+            .iter()
+            .find(|c| c.id == "pdfua2-fenote")
+            .unwrap();
+        assert!(note_check.passed);
+    }
+
+    #[test]
+    fn pdfua2_em_and_strong_in_compliant_doc() {
+        let tree = StructTree {
+            role_map: RoleMap::new(),
+            children: vec![make_elem(
+                "Document",
+                vec![make_elem(
+                    "P",
+                    vec![make_elem("Em", vec![]), make_elem("Strong", vec![])],
+                )],
+            )],
+            lang: Some("en".into()),
+        };
+        let report = validate_pdf_ua(&tree);
+        // Em and Strong are valid inline elements — no new checks should fail
+        let failures: Vec<_> = report.failures();
+        assert!(
+            failures.is_empty(),
+            "Em and Strong should not cause failures: {:?}",
+            failures
+        );
     }
 
     #[test]

@@ -931,6 +931,108 @@ impl Document {
             .ok_or_else(|| PdfError::InvalidStructure("/Pages is not a reference".to_string()))
     }
 
+    /// Appends a content stream to an existing page.
+    ///
+    /// Creates a new stream object from `content` bytes, adds it to the
+    /// page's `/Contents` (converting a single reference to an array if
+    /// needed), and merges `fonts` into the page's `/Resources /Font`.
+    ///
+    /// This is the building block for OCR invisible text overlays and
+    /// other content additions to existing pages.
+    pub fn append_content_stream(
+        &mut self,
+        page_index: usize,
+        content: &[u8],
+        fonts: Option<Dictionary>,
+    ) -> PdfResult<()> {
+        let page_id = self.page_object_id(page_index)?;
+
+        // Create the new content stream object
+        let mut stream_dict = Dictionary::new();
+        stream_dict.insert(
+            PdfName::new("Length"),
+            Object::Integer(content.len() as i64),
+        );
+        let stream = crate::core::objects::PdfStream::new(stream_dict, content.to_vec());
+        let stream_id = self.add_object(Object::Stream(stream));
+        let stream_ref = Object::Reference(IndirectRef::new(stream_id.0, stream_id.1));
+
+        // Get the page dictionary mutably
+        let page = self
+            .get_object_mut(page_id)
+            .and_then(|o| {
+                if let Object::Dictionary(d) = o {
+                    Some(d)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| PdfError::InvalidStructure("Page is not a dictionary".to_string()))?;
+
+        // Append to /Contents: convert single ref → array, or create new
+        match page.get_str("Contents").cloned() {
+            Some(Object::Reference(_)) => {
+                let existing = page.get_str("Contents").cloned().unwrap();
+                page.insert(
+                    PdfName::new("Contents"),
+                    Object::Array(vec![existing, stream_ref]),
+                );
+            }
+            Some(Object::Array(mut arr)) => {
+                arr.push(stream_ref);
+                page.insert(PdfName::new("Contents"), Object::Array(arr));
+            }
+            _ => {
+                page.insert(PdfName::new("Contents"), stream_ref);
+            }
+        }
+
+        // Merge fonts into /Resources /Font
+        if let Some(new_fonts) = fonts {
+            let resources = page
+                .entry(PdfName::new("Resources"))
+                .or_insert_with(|| Object::Dictionary(Dictionary::new()));
+            if let Object::Dictionary(res) = resources {
+                let font_dict = res
+                    .entry(PdfName::new("Font"))
+                    .or_insert_with(|| Object::Dictionary(Dictionary::new()));
+                if let Object::Dictionary(fd) = font_dict {
+                    for (key, val) in new_fonts.iter() {
+                        fd.entry(key.clone()).or_insert_with(|| val.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns the indirect object ID of the page at `index`.
+    ///
+    /// Walks the `/Kids` array in the page tree root.
+    pub fn page_object_id(&self, index: usize) -> PdfResult<ObjectId> {
+        let pages_id = self.pages_id()?;
+        let pages = self
+            .get_object(pages_id)
+            .and_then(|o| o.as_dict())
+            .ok_or_else(|| PdfError::InvalidStructure("Cannot get /Pages dict".to_string()))?;
+        let kids = pages
+            .get_str("Kids")
+            .and_then(|o| o.as_array())
+            .ok_or_else(|| PdfError::InvalidStructure("No /Kids in /Pages".to_string()))?;
+        if index >= kids.len() {
+            return Err(PdfError::InvalidPage(format!(
+                "Page index {} out of range (total: {})",
+                index,
+                kids.len()
+            )));
+        }
+        kids[index]
+            .as_reference()
+            .ok_or_else(|| PdfError::InvalidStructure("Page ref is not a reference".to_string()))
+            .map(|r| r.id())
+    }
+
     /// Adds a blank page with the given dimensions (in points).
     ///
     /// Returns the zero-based page index. Standard US Letter is
@@ -2769,5 +2871,96 @@ mod tests {
 
         // But page_count should still work
         assert_eq!(lazy.page_count().unwrap(), 5);
+    }
+
+    #[test]
+    fn append_content_stream_adds_text_to_page() {
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        // Build invisible text content stream
+        let content = b"BT 3 Tr /F1 12 Tf 100 700 Td (Hello OCR) Tj ET";
+
+        // Create Helvetica font dict
+        let helv = crate::fonts::standard14::Standard14Font::from_name("Helvetica").unwrap();
+        let mut fonts = Dictionary::new();
+        fonts.insert(
+            PdfName::new("F1"),
+            Object::Dictionary(helv.to_font_dictionary()),
+        );
+
+        doc.append_content_stream(0, content, Some(fonts)).unwrap();
+
+        // Roundtrip: serialize and reparse
+        let bytes = doc.to_bytes().unwrap();
+        let parsed = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed.page_count().unwrap(), 1);
+
+        // The page should now have content
+        let page = parsed.get_page(0).unwrap();
+        assert!(page.get_str("Contents").is_some());
+    }
+
+    #[test]
+    fn append_content_stream_preserves_existing_content() {
+        use crate::content::ContentStreamBuilder;
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        // First content stream with visible text
+        let mut builder = ContentStreamBuilder::new();
+        builder
+            .begin_text()
+            .set_font("F1", 12.0)
+            .move_to(72.0, 720.0)
+            .show_text("Original")
+            .end_text();
+        let first = builder.build();
+
+        let helv = crate::fonts::standard14::Standard14Font::from_name("Helvetica").unwrap();
+        let mut fonts1 = Dictionary::new();
+        fonts1.insert(
+            PdfName::new("F1"),
+            Object::Dictionary(helv.to_font_dictionary()),
+        );
+        doc.append_content_stream(0, &first, Some(fonts1)).unwrap();
+
+        // Second content stream (OCR overlay)
+        let second = b"BT 3 Tr /F1 12 Tf 100 600 Td (OCR Text) Tj ET";
+        doc.append_content_stream(0, second, None).unwrap();
+
+        // Roundtrip
+        let bytes = doc.to_bytes().unwrap();
+        let parsed = Document::from_bytes(&bytes).unwrap();
+
+        // /Contents should now be an array with 2 entries
+        let page = parsed.get_page(0).unwrap();
+        let contents = page.get_str("Contents").unwrap();
+        assert!(
+            contents.as_array().is_some(),
+            "/Contents should be an array"
+        );
+        assert_eq!(contents.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn page_object_id_returns_valid_id() {
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+        doc.add_page(595.0, 842.0).unwrap();
+
+        let id0 = doc.page_object_id(0).unwrap();
+        let id1 = doc.page_object_id(1).unwrap();
+
+        assert_ne!(id0, id1);
+        assert!(doc.get_object(id0).is_some());
+        assert!(doc.get_object(id1).is_some());
+    }
+
+    #[test]
+    fn page_object_id_out_of_range() {
+        let doc = Document::new();
+        assert!(doc.page_object_id(0).is_err());
     }
 }

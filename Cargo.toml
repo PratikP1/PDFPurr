@@ -1,6 +1,6 @@
 [package]
 name = "pdfpurr"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.87"
 authors = ["PratikP1"]
@@ -28,6 +28,14 @@ default = ["jpeg2000"]
 ## Enable JPEG2000 (JPX) image decoding. Pulls in C dependencies via openjpeg.
 ## Disable this feature to avoid the openjpeg C build dependency.
 jpeg2000 = ["dep:jpeg2k"]
+
+## Enable OCR for image-only PDF accessibility. Pure Rust via ocrs + RTen.
+## Models (~10MB) must be downloaded separately — see OcrsEngine docs.
+ocr = ["dep:ocrs", "dep:rten"]
+
+## Enable PaddleOCR engine. Pure Rust via tract-onnx. Multi-language, higher accuracy.
+## Requires PP-OCRv4 ONNX models (~10MB) — see PaddleOcrEngine docs.
+ocr-paddle = ["dep:tract-onnx"]
 
 [dependencies]
 # Core parsing and serialization
@@ -76,6 +84,13 @@ allsorts = "0.16.1"
 
 # Rendering
 tiny-skia = "0.11"
+
+# OCR (optional — enabled by "ocr" feature)
+ocrs = { version = "0.11", optional = true }
+rten = { version = "0.22", optional = true }
+
+# PaddleOCR (optional — enabled by "ocr-paddle" feature)
+tract-onnx = { version = "0.21", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"
