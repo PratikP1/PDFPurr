@@ -675,8 +675,7 @@ mod tests {
 
     #[test]
     fn pdfua2_elements_in_structure_tree() {
-        let em_elem =
-            Object::Dictionary(make_dict(vec![("S", Object::Name(PdfName::new("Em")))]));
+        let em_elem = Object::Dictionary(make_dict(vec![("S", Object::Name(PdfName::new("Em")))]));
         let strong_elem =
             Object::Dictionary(make_dict(vec![("S", Object::Name(PdfName::new("Strong")))]));
         let fenote_elem =

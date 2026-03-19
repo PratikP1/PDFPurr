@@ -9,7 +9,7 @@
 
 PDFPurr is a comprehensive PDF library for Rust that reads, writes, edits, renders, OCRs, and validates PDF documents. It supports PDF 1.0 through 2.0, with first-class support for accessibility (PDF/UA), archival (PDF/A), and print production (PDF/X) standards.
 
-950+ tests across unit, integration, adversarial, property-based, and fuzz testing. CI runs on Ubuntu, macOS, and Windows with nightly clippy and libFuzzer smoke tests.
+1000+ tests across unit, integration, adversarial, property-based, and fuzz testing. CI runs on Ubuntu, macOS, and Windows with nightly clippy and libFuzzer smoke tests.
 
 ## Quick Start
 
@@ -92,40 +92,39 @@ Text extraction uses font encoding tables (WinAnsiEncoding, MacRomanEncoding, PD
 
 ### OCR for Image-Only PDFs
 
-Make scanned documents searchable and accessible with pure-Rust OCR. Two engines available:
+Make scanned documents searchable and accessible. Three engines available — Windows OCR and Tesseract work out of the box with no feature flags.
 
-**ocrs (Latin text, lightweight):**
+**Windows OCR (recommended on Windows, ~95% accuracy, zero dependencies):**
 ```rust
 use pdfpurr::Document;
 use pdfpurr::ocr::{OcrConfig, OcrEngine};
-use pdfpurr::ocr::ocrs_engine::OcrsEngine;  // requires "ocr" feature
+use pdfpurr::ocr::windows_engine::WindowsOcrEngine;
 
-let engine = OcrsEngine::new("text-detection.rten", "text-recognition.rten").unwrap();
-let mut doc = Document::open("scanned.pdf").unwrap();
-let pages_ocrd = doc.ocr_all_pages(&engine, &OcrConfig::default()).unwrap();
-doc.save("searchable.pdf").unwrap();
-println!("OCR'd {} pages", pages_ocrd);
-```
-
-**PaddleOCR (multi-language, higher accuracy):**
-```rust
-use pdfpurr::Document;
-use pdfpurr::ocr::{OcrConfig, OcrEngine};
-use pdfpurr::ocr::paddle_engine::PaddleOcrEngine;  // requires "ocr-paddle" feature
-
-// English
-let engine = PaddleOcrEngine::with_english("det.onnx", "rec.onnx").unwrap();
-
-// Chinese (with external dictionary)
-// let dict = pdfpurr::ocr::paddle_dict::load_dictionary_from_file("ppocr_keys_v1.txt")?;
-// let engine = PaddleOcrEngine::new("det.onnx", "rec_ch.onnx", dict)?;
-
+let engine = WindowsOcrEngine::new();
 let mut doc = Document::open("scanned.pdf").unwrap();
 doc.ocr_all_pages(&engine, &OcrConfig::default()).unwrap();
 doc.save("searchable.pdf").unwrap();
 ```
 
-OCR overlays invisible text (rendering mode 3) on top of the original page image, making the document searchable and accessible to screen readers while preserving the visual appearance.
+**Tesseract (~85-89% accuracy, requires `tesseract` CLI):**
+```rust
+use pdfpurr::ocr::tesseract_engine::TesseractEngine;
+
+let engine = TesseractEngine::new("eng");
+if engine.is_available() {
+    doc.ocr_all_pages(&engine, &OcrConfig::default()).unwrap();
+}
+```
+
+**ocrs (pure Rust, Latin only, requires `ocr` feature):**
+```rust
+use pdfpurr::ocr::ocrs_engine::OcrsEngine;  // requires "ocr" feature
+
+let engine = OcrsEngine::new("text-detection.rten", "text-recognition.rten").unwrap();
+doc.ocr_all_pages(&engine, &OcrConfig::default()).unwrap();
+```
+
+All engines overlay invisible text (rendering mode 3) with tagged PDF structure (`<Document>`, `<H1>`–`<H6>`, `<P>`) for screen reader accessibility.
 
 ### Image Extraction
 
@@ -358,18 +357,16 @@ std::fs::write("approved.pdf", &updated).unwrap();
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `jpeg2000` | Yes | JPEG2000 decoding via openjpeg (C dependency) |
-| `ocr` | No | OCR via ocrs (pure Rust, Latin text) |
-| `ocr-paddle` | No | OCR via PaddleOCR + tract-onnx (pure Rust, multi-language) |
+| `ocr` | No | Adds ocrs engine (pure Rust, Latin text) |
+
+Windows OCR and Tesseract engines are **always available** — no feature flag needed.
 
 ```toml
-# Minimal (no JPEG2000, no OCR)
-pdfpurr = { version = "0.1", default-features = false }
+# Default (no ocrs engine)
+pdfpurr = "0.2"
 
-# With OCR
-pdfpurr = { version = "0.1", features = ["ocr"] }
-
-# With PaddleOCR (multi-language)
-pdfpurr = { version = "0.1", features = ["ocr-paddle"] }
+# With ocrs pure-Rust engine
+pdfpurr = { version = "0.2", features = ["ocr"] }
 ```
 
 ## Architecture
@@ -406,8 +403,7 @@ pdfpurr/
 ## Testing
 
 ```bash
-cargo test                       # 954 tests (all features)
-cargo test --features ocr-paddle # includes PaddleOCR preprocessing/postprocessing tests
+cargo test                       # all tests
 cargo bench                      # Criterion benchmarks
 cargo clippy -- -D warnings      # Lint check (clean on stable and nightly)
 cargo fmt --check                # Format check

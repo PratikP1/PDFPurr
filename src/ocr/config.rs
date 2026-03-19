@@ -6,6 +6,8 @@ pub struct OcrConfig {
     /// DPI for rendering pages before OCR (default: 300).
     ///
     /// Higher DPI improves accuracy but increases processing time.
+    /// 300 DPI is recommended for scanned documents; 150 may suffice
+    /// for clean digital content.
     pub dpi: f64,
     /// Minimum word confidence threshold (0.0–1.0, default: 0.3).
     ///
@@ -13,6 +15,16 @@ pub struct OcrConfig {
     pub min_confidence: f32,
     /// Skip pages that already contain extractable text (default: true).
     pub skip_text_pages: bool,
+    /// Apply contrast enhancement and Otsu binarization before OCR (default: true).
+    ///
+    /// Preprocessing significantly improves accuracy on low-contrast,
+    /// washed-out, or noisy scans. Disable for already-clean digital images.
+    pub preprocess: bool,
+    /// Document language for tagged PDF structure (BCP 47, default: "en").
+    ///
+    /// Set to the primary language of the scanned document for correct
+    /// screen reader pronunciation.
+    pub language: String,
 }
 
 impl Default for OcrConfig {
@@ -21,6 +33,8 @@ impl Default for OcrConfig {
             dpi: 300.0,
             min_confidence: 0.3,
             skip_text_pages: true,
+            preprocess: true,
+            language: "en".to_string(),
         }
     }
 }

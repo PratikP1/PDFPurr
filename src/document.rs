@@ -989,16 +989,48 @@ impl Document {
 
         // Merge fonts into /Resources /Font
         if let Some(new_fonts) = fonts {
-            let resources = page
-                .entry(PdfName::new("Resources"))
-                .or_insert_with(|| Object::Dictionary(Dictionary::new()));
-            if let Object::Dictionary(res) = resources {
-                let font_dict = res
-                    .entry(PdfName::new("Font"))
+            // Handle both inline resources and indirect resource references
+            let res_ref = page.get_str("Resources").cloned();
+            let res_id = match &res_ref {
+                Some(Object::Reference(r)) => Some(r.id()),
+                _ => None,
+            };
+
+            if let Some(rid) = res_id {
+                // Resources is an indirect reference — modify the target object
+                if let Some(Object::Dictionary(res)) = self.get_object_mut(rid) {
+                    let font_entry = res
+                        .entry(PdfName::new("Font"))
+                        .or_insert_with(|| Object::Dictionary(Dictionary::new()));
+                    if let Object::Dictionary(fd) = font_entry {
+                        for (key, val) in new_fonts.iter() {
+                            fd.entry(key.clone()).or_insert_with(|| val.clone());
+                        }
+                    }
+                }
+            } else {
+                // Resources is inline or missing — modify page dict directly
+                let page = self
+                    .get_object_mut(page_id)
+                    .and_then(|o| {
+                        if let Object::Dictionary(d) = o {
+                            Some(d)
+                        } else {
+                            None
+                        }
+                    })
+                    .ok_or_else(|| PdfError::InvalidStructure("Page dict lost".to_string()))?;
+                let resources = page
+                    .entry(PdfName::new("Resources"))
                     .or_insert_with(|| Object::Dictionary(Dictionary::new()));
-                if let Object::Dictionary(fd) = font_dict {
-                    for (key, val) in new_fonts.iter() {
-                        fd.entry(key.clone()).or_insert_with(|| val.clone());
+                if let Object::Dictionary(res) = resources {
+                    let font_dict = res
+                        .entry(PdfName::new("Font"))
+                        .or_insert_with(|| Object::Dictionary(Dictionary::new()));
+                    if let Object::Dictionary(fd) = font_dict {
+                        for (key, val) in new_fonts.iter() {
+                            fd.entry(key.clone()).or_insert_with(|| val.clone());
+                        }
                     }
                 }
             }

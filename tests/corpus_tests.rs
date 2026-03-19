@@ -373,6 +373,115 @@ fn corpus_all_files_no_panic() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Scanned PDFs — image-only documents for OCR pipeline testing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn corpus_scanned_parse_and_have_images() {
+    let names = [
+        "crazyones.pdf",
+        "graph_scanned.pdf",
+        "linn_scanned.pdf",
+        "skew_scanned.pdf",
+    ];
+    for name in &names {
+        let data = match read_corpus("scanned", name) {
+            Some(d) => d,
+            None => continue,
+        };
+        let doc =
+            Document::from_bytes(&data).unwrap_or_else(|e| panic!("{name} should parse: {e}"));
+        let pages = doc.page_count().unwrap();
+        assert!(pages > 0, "{name} should have pages");
+
+        // Scanned PDFs should be parseable with page content accessible
+        // (some scanned PDFs embed images via inline operators rather than
+        // XObject resources, so page_images() may return empty)
+        let text = doc.extract_page_text(0).unwrap_or_default();
+        let page = doc.get_page(0).unwrap();
+        let images = doc.page_images(page);
+        // At least one of: extractable images, extractable text, or renderable
+        let renderer = Renderer::new(
+            &doc,
+            RenderOptions {
+                dpi: 72.0,
+                background: [255, 255, 255, 255],
+            },
+        );
+        let rendered = renderer.render_page(0).is_ok();
+        assert!(
+            !images.is_empty() || !text.is_empty() || rendered,
+            "{name} should have images, text, or be renderable"
+        );
+    }
+}
+
+#[test]
+fn corpus_scanned_render_without_panic() {
+    let names = ["graph_scanned.pdf", "linn_scanned.pdf", "skew_scanned.pdf"];
+    for name in &names {
+        let data = match read_corpus("scanned", name) {
+            Some(d) => d,
+            None => continue,
+        };
+        let doc = Document::from_bytes(&data).unwrap();
+        let renderer = Renderer::new(
+            &doc,
+            RenderOptions {
+                dpi: 72.0,
+                background: [255, 255, 255, 255],
+            },
+        );
+        // Must not panic even on scanned content
+        let result = renderer.render_page(0);
+        assert!(result.is_ok(), "{name} render failed: {:?}", result.err());
+    }
+}
+
+#[test]
+fn corpus_scanned_text_extraction_minimal_on_image_only() {
+    // Image-only scanned PDFs should have little/no extractable text
+    // (that's the whole reason OCR exists)
+    for name in &["graph_scanned.pdf", "linn_scanned.pdf"] {
+        let data = match read_corpus("scanned", name) {
+            Some(d) => d,
+            None => continue,
+        };
+        let doc = Document::from_bytes(&data).unwrap();
+        let text = doc.extract_page_text(0).unwrap_or_default();
+        // These are scanned images — text should be empty or very short
+        assert!(
+            text.trim().len() < 50,
+            "{name} should have minimal text (got {} chars: {:?})",
+            text.len(),
+            &text[..text.len().min(100)]
+        );
+    }
+}
+
+#[test]
+fn corpus_scanned_accessibility_report_flags_issues() {
+    // Scanned PDFs without OCR should fail accessibility checks
+    for name in &["graph_scanned.pdf", "linn_scanned.pdf"] {
+        let data = match read_corpus("scanned", name) {
+            Some(d) => d,
+            None => continue,
+        };
+        let doc = Document::from_bytes(&data).unwrap();
+        let report = doc.accessibility_report();
+        // Should not be compliant (no tags, no text, no alt text)
+        assert!(
+            !report.is_compliant(),
+            "{name} scanned PDF should NOT be accessible without OCR"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 /// Simple recursive directory walker (avoids external dependency).
 fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();

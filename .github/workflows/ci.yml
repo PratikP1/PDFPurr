@@ -48,6 +48,21 @@ jobs:
         # working-directory at repo root
         run: cargo clippy -- -D warnings
 
+      - name: Install Tesseract (Ubuntu)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+
+      - name: Install Tesseract (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tesseract
+
+      - name: Install Tesseract (Windows)
+        if: runner.os == 'Windows'
+        run: choco install tesseract --no-progress -y
+
+      - name: Verify Tesseract
+        run: tesseract --version || echo "Tesseract not in PATH (Windows may need restart)"
+
       - name: Run tests
         # working-directory at repo root
         run: cargo test
@@ -59,6 +74,11 @@ jobs:
       - name: Build docs
         # working-directory at repo root
         run: cargo doc --no-deps
+
+      - name: Run OCR tests with native Windows OCR
+        if: runner.os == 'Windows'
+        # working-directory at repo root
+        run: cargo test --features ocr-windows-native
 
   fuzz:
     runs-on: ubuntu-latest

@@ -13,23 +13,23 @@
 //! 4. Generate invisible text layer with correct positioning
 //! 5. Append the text layer to the page
 //!
-//! The [`OcrEngine`] trait abstracts over OCR backends. Enable the `ocr`
-//! feature for the built-in `ocrs`-based engine.
+//! The [`OcrEngine`] trait abstracts over OCR backends:
+//! - [`windows_engine::WindowsOcrEngine`] — Windows OCR (always available, ~95% accuracy)
+//! - [`tesseract_engine::TesseractEngine`] — Tesseract CLI (always available, ~85-89%)
+//! - `ocrs_engine::OcrsEngine` — pure-Rust ocrs (requires `ocr` feature, Latin only)
 
 pub mod config;
+pub mod constants;
 pub mod engine;
 pub mod layout;
 #[cfg(feature = "ocr")]
 pub mod ocrs_engine;
-#[cfg(feature = "ocr-paddle")]
-pub mod paddle_dict;
-#[cfg(feature = "ocr-paddle")]
-pub mod paddle_engine;
-#[cfg(feature = "ocr-paddle")]
-pub mod paddle_postprocess;
-#[cfg(feature = "ocr-paddle")]
-pub mod paddle_preprocess;
+pub mod preprocess;
+pub mod tesseract_engine;
 pub mod text_layer;
+pub mod windows_engine;
+#[cfg(feature = "ocr-windows-native")]
+pub mod windows_native_engine;
 
 pub use config::OcrConfig;
 pub use engine::{OcrEngine, OcrImage, OcrResult, OcrWord};
@@ -185,6 +185,167 @@ mod tests {
     }
 
     #[test]
+    fn ocr_text_extractable_after_apply() {
+        use crate::Document;
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        let engine = MockOcrEngine {
+            words: vec![
+                OcrWord {
+                    text: "Hello".to_string(),
+                    x: 100,
+                    y: 100,
+                    width: 200,
+                    height: 40,
+                    confidence: 0.95,
+                },
+                OcrWord {
+                    text: "World".to_string(),
+                    x: 350,
+                    y: 100,
+                    width: 200,
+                    height: 40,
+                    confidence: 0.92,
+                },
+            ],
+        };
+
+        let applied = doc.ocr_page(0, &engine, &OcrConfig::default()).unwrap();
+        assert!(applied);
+
+        // The invisible OCR text should be extractable
+        let text = doc.extract_page_text(0).unwrap_or_default();
+        assert!(
+            text.contains("Hello"),
+            "Extracted text should contain 'Hello', got: {:?}",
+            text
+        );
+        assert!(
+            text.contains("World"),
+            "Extracted text should contain 'World', got: {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn ocr_text_survives_roundtrip() {
+        use crate::Document;
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        let engine = MockOcrEngine {
+            words: vec![OcrWord {
+                text: "Roundtrip".to_string(),
+                x: 100,
+                y: 100,
+                width: 300,
+                height: 40,
+                confidence: 0.95,
+            }],
+        };
+
+        doc.ocr_page(0, &engine, &OcrConfig::default()).unwrap();
+
+        // Save to bytes and reload
+        let bytes = doc.to_bytes().unwrap();
+        let reloaded = Document::from_bytes(&bytes).unwrap();
+        let text = reloaded.extract_page_text(0).unwrap_or_default();
+        assert!(
+            text.contains("Roundtrip"),
+            "OCR text should survive save/reload, got: {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn ocr_text_extractable_on_page_with_existing_image_content() {
+        // Simulates a scanned PDF: page has existing content (image Do),
+        // then OCR appends invisible text. Text extraction must find the OCR text.
+        use crate::Document;
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        // Add fake image content (simulates scanned page)
+        let image_content = b"q 612 0 0 792 0 0 cm /Im0 Do Q";
+        doc.append_content_stream(0, image_content, None).unwrap();
+
+        let engine = MockOcrEngine {
+            words: vec![OcrWord {
+                text: "ScannedText".to_string(),
+                x: 100,
+                y: 100,
+                width: 300,
+                height: 40,
+                confidence: 0.95,
+            }],
+        };
+
+        doc.ocr_page(0, &engine, &OcrConfig::default()).unwrap();
+
+        // Verify the OCR font was added to the page resources
+        let page = doc.get_page(0).unwrap();
+        let fonts = doc.page_fonts(page);
+        assert!(
+            fonts.contains_key("F_OCR"),
+            "Page should have F_OCR font after OCR, got keys: {:?}",
+            fonts.keys().collect::<Vec<_>>()
+        );
+
+        let text = doc.extract_page_text(0).unwrap_or_default();
+        assert!(
+            text.contains("ScannedText"),
+            "Should extract OCR text from page with existing image content, got: {:?}",
+            text
+        );
+    }
+
+    #[test]
+    fn ocr_font_found_on_real_scanned_pdf() {
+        // Test with a real scanned PDF (if available) to verify font resolution
+        use crate::Document;
+        use std::path::Path;
+
+        let path = Path::new("tests/corpus/scanned/graph_scanned.pdf");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(path).unwrap();
+        let mut doc = Document::from_bytes(&data).unwrap();
+
+        let engine = MockOcrEngine {
+            words: vec![OcrWord {
+                text: "TestWord".to_string(),
+                x: 100,
+                y: 100,
+                width: 200,
+                height: 30,
+                confidence: 0.9,
+            }],
+        };
+
+        doc.ocr_page(0, &engine, &OcrConfig::default()).unwrap();
+
+        let page = doc.get_page(0).unwrap();
+        let fonts = doc.page_fonts(page);
+        assert!(
+            fonts.contains_key("F_OCR"),
+            "Real scanned PDF should have F_OCR after OCR, got keys: {:?}",
+            fonts.keys().collect::<Vec<_>>()
+        );
+
+        let text = doc.extract_page_text(0).unwrap_or_default();
+        assert!(
+            text.contains("TestWord"),
+            "Should extract mock OCR text from real scanned PDF, got: {:?}",
+            text
+        );
+    }
+
+    #[test]
     fn ocr_all_pages_counts_correctly() {
         use crate::Document;
 
@@ -213,7 +374,7 @@ mod tests {
 
 use crate::core::objects::{Dictionary, Object, PdfName};
 use crate::document::Document;
-use crate::error::{PdfError, PdfResult};
+use crate::error::PdfResult;
 use crate::rendering::{RenderOptions, Renderer};
 
 impl Document {
@@ -256,8 +417,15 @@ impl Document {
         );
         let pixmap = renderer.render_page(page_index)?;
 
-        // Convert to grayscale for OCR
-        let ocr_image = pixmap_to_grayscale(&pixmap);
+        // Convert to grayscale
+        let grayscale = pixmap_to_grayscale(&pixmap);
+
+        // Optionally preprocess (contrast + binarization)
+        let ocr_image = if config.preprocess {
+            preprocess::preprocess_for_ocr(&grayscale)
+        } else {
+            grayscale
+        };
 
         // Run OCR
         let result = engine.recognize(&ocr_image)?;
@@ -265,20 +433,40 @@ impl Document {
             return Ok(false);
         }
 
-        // Generate invisible text layer
-        let content = text_layer::build_ocr_text_layer(&result, page_width, page_height, config);
+        // Generate invisible text layer with ToUnicode CMap
+        let layer = text_layer::build_ocr_text_layer(&result, page_width, page_height, config);
 
-        // Create Helvetica font for invisible text
-        let helv = crate::fonts::standard14::Standard14Font::from_name("Helvetica")
-            .ok_or_else(|| PdfError::Other("Helvetica not found".to_string()))?;
-        let mut fonts = Dictionary::new();
-        fonts.insert(
-            PdfName::new(OCR_FONT_NAME),
-            Object::Dictionary(helv.to_font_dictionary()),
+        // Create OCR font with ToUnicode CMap for full Unicode support
+        let mut font_dict = Dictionary::new();
+        font_dict.insert(PdfName::new("Type"), Object::Name(PdfName::new("Font")));
+        font_dict.insert(PdfName::new("Subtype"), Object::Name(PdfName::new("Type1")));
+        font_dict.insert(
+            PdfName::new("BaseFont"),
+            Object::Name(PdfName::new("Helvetica")),
         );
 
+        // Attach ToUnicode CMap if present (enables correct Unicode extraction)
+        if let Some(cmap_stream) = layer.to_unicode_cmap {
+            let cmap_id = self.add_object(Object::Stream(cmap_stream));
+            font_dict.insert(
+                PdfName::new("ToUnicode"),
+                Object::Reference(crate::core::objects::IndirectRef::new(cmap_id.0, cmap_id.1)),
+            );
+        }
+
+        let mut fonts = Dictionary::new();
+        fonts.insert(PdfName::new(OCR_FONT_NAME), Object::Dictionary(font_dict));
+
         // Append to page
-        self.append_content_stream(page_index, &content, Some(fonts))?;
+        self.append_content_stream(page_index, &layer.content, Some(fonts))?;
+
+        // Build tagged PDF structure (StructTreeRoot, Document → P/H elements)
+        crate::accessibility::structure_builder::add_tagged_structure_from_ocr(
+            self,
+            page_index,
+            &result,
+            &config.language,
+        )?;
 
         Ok(true)
     }

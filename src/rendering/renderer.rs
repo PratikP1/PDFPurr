@@ -173,14 +173,14 @@ impl<'a> Renderer<'a> {
                 )
             }
             270 | -90 => {
-                // Rotate 270° CW: x' = height - y, y' = x
+                // Rotate 270° CW: compose rotation [0,-1,1,0] with Y-flip [1,0,0,-1]
                 Transform::from_row(
                     0.0,
-                    s,
+                    -s,
                     -s,
                     0.0,
                     (crop_box[3] * scale) as f32,
-                    -(crop_box[0] * scale) as f32,
+                    (crop_box[2] * scale) as f32,
                 )
             }
             180 | -180 => {

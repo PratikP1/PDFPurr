@@ -548,3 +548,170 @@ fn generated_incremental_update_roundtrip() {
     // Original bytes should be preserved at the start
     assert!(update2.starts_with(&original));
 }
+
+// ---------------------------------------------------------------------------
+// OCR → Tagged PDF roundtrip
+// ---------------------------------------------------------------------------
+
+/// Mock OCR engine that returns predictable words for roundtrip testing.
+struct MockOcrEngine;
+
+impl pdfpurr::ocr::OcrEngine for MockOcrEngine {
+    fn recognize(
+        &self,
+        image: &pdfpurr::ocr::OcrImage,
+    ) -> pdfpurr::error::PdfResult<pdfpurr::ocr::OcrResult> {
+        Ok(pdfpurr::ocr::OcrResult {
+            words: vec![
+                // Heading (tall)
+                pdfpurr::ocr::OcrWord {
+                    text: "Chapter".into(),
+                    x: 200,
+                    y: 100,
+                    width: 400,
+                    height: 60,
+                    confidence: 0.95,
+                },
+                pdfpurr::ocr::OcrWord {
+                    text: "One".into(),
+                    x: 650,
+                    y: 100,
+                    width: 200,
+                    height: 60,
+                    confidence: 0.95,
+                },
+                // Body text (normal)
+                pdfpurr::ocr::OcrWord {
+                    text: "This".into(),
+                    x: 200,
+                    y: 300,
+                    width: 100,
+                    height: 20,
+                    confidence: 0.90,
+                },
+                pdfpurr::ocr::OcrWord {
+                    text: "is".into(),
+                    x: 350,
+                    y: 300,
+                    width: 50,
+                    height: 20,
+                    confidence: 0.90,
+                },
+                pdfpurr::ocr::OcrWord {
+                    text: "body".into(),
+                    x: 450,
+                    y: 300,
+                    width: 100,
+                    height: 20,
+                    confidence: 0.88,
+                },
+                pdfpurr::ocr::OcrWord {
+                    text: "text.".into(),
+                    x: 600,
+                    y: 300,
+                    width: 100,
+                    height: 20,
+                    confidence: 0.92,
+                },
+            ],
+            image_width: image.width,
+            image_height: image.height,
+        })
+    }
+}
+
+#[test]
+fn ocr_roundtrip_produces_tagged_pdf() {
+    use pdfpurr::ocr::OcrConfig;
+
+    // Step 1: Create a blank PDF
+    let mut doc = Document::new();
+    doc.add_page(612.0, 792.0).unwrap();
+
+    // Step 2: Run OCR with mock engine
+    let engine = MockOcrEngine;
+    let config = OcrConfig::default();
+    let count = doc.ocr_all_pages(&engine, &config).unwrap();
+    assert_eq!(count, 1, "Should OCR 1 page");
+
+    // Step 3: Write to bytes
+    let bytes = doc.to_bytes().unwrap();
+
+    // Step 4: Parse back
+    let doc2 = Document::from_bytes(&bytes).unwrap();
+
+    // Step 5: Verify structure tree exists
+    let tree = doc2.structure_tree();
+    assert!(tree.is_some(), "Parsed PDF should have structure tree");
+    let tree = tree.unwrap();
+    assert!(tree.lang.is_some(), "Should have document language");
+
+    // Step 6: Verify text is extractable
+    let text = doc2.extract_page_text(0).unwrap();
+    assert!(
+        text.contains("Chapter") || text.contains("body"),
+        "OCR text should be extractable from parsed PDF, got: {}",
+        text
+    );
+}
+
+#[test]
+fn ocr_roundtrip_structure_has_heading_and_paragraph() {
+    use pdfpurr::ocr::OcrConfig;
+
+    let mut doc = Document::new();
+    doc.add_page(612.0, 792.0).unwrap();
+
+    let engine = MockOcrEngine;
+    let config = OcrConfig::default();
+    doc.ocr_all_pages(&engine, &config).unwrap();
+
+    let tree = doc.structure_tree().unwrap();
+    let doc_elem = &tree.children[0];
+    assert_eq!(doc_elem.struct_type, "Document");
+
+    // Should have both heading and paragraph children
+    let types: Vec<&str> = doc_elem
+        .children
+        .iter()
+        .map(|c| c.struct_type.as_str())
+        .collect();
+
+    assert!(
+        types.iter().any(|t| t.starts_with('H')),
+        "Should detect heading from tall text, got types: {:?}",
+        types
+    );
+    assert!(
+        types.contains(&"P"),
+        "Should have paragraph element, got types: {:?}",
+        types
+    );
+}
+
+#[test]
+fn ocr_roundtrip_accessibility_report() {
+    use pdfpurr::ocr::OcrConfig;
+
+    let mut doc = Document::new();
+    doc.add_page(612.0, 792.0).unwrap();
+
+    let engine = MockOcrEngine;
+    let config = OcrConfig::default();
+    doc.ocr_all_pages(&engine, &config).unwrap();
+
+    // Run accessibility validation
+    let report = doc.accessibility_report();
+
+    // Tagged PDF check should pass
+    let tagged = report.checks.iter().find(|c| c.id == "tagged-pdf").unwrap();
+    assert!(tagged.passed, "OCR'd PDF should be tagged");
+
+    // Language check should pass
+    let lang = report
+        .checks
+        .iter()
+        .find(|c| c.id == "document-language")
+        .unwrap();
+    assert!(lang.passed, "OCR'd PDF should have language set");
+}

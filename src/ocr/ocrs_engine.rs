@@ -29,17 +29,17 @@ impl OcrsEngine {
         recognition_model_path: P,
     ) -> PdfResult<Self> {
         let detection_model = rten::Model::load_file(detection_model_path.as_ref())
-            .map_err(|e| PdfError::Other(format!("Load detection model: {}", e)))?;
+            .map_err(|e| PdfError::OcrError(format!("Load detection model: {}", e)))?;
 
         let recognition_model = rten::Model::load_file(recognition_model_path.as_ref())
-            .map_err(|e| PdfError::Other(format!("Load recognition model: {}", e)))?;
+            .map_err(|e| PdfError::OcrError(format!("Load recognition model: {}", e)))?;
 
         let engine = ocrs::OcrEngine::new(ocrs::OcrEngineParams {
             detection_model: Some(detection_model),
             recognition_model: Some(recognition_model),
             ..Default::default()
         })
-        .map_err(|e| PdfError::Other(format!("Init OCR engine: {}", e)))?;
+        .map_err(|e| PdfError::OcrError(format!("Init OCR engine: {}", e)))?;
 
         Ok(Self { engine })
     }
@@ -60,24 +60,24 @@ impl OcrEngine for OcrsEngine {
         }
 
         let img_source = ocrs::ImageSource::from_bytes(&rgb, (width, height))
-            .map_err(|e| PdfError::Other(format!("OCR image source: {}", e)))?;
+            .map_err(|e| PdfError::OcrError(format!("OCR image source: {}", e)))?;
 
         let input = self
             .engine
             .prepare_input(img_source)
-            .map_err(|e| PdfError::Other(format!("OCR prepare: {}", e)))?;
+            .map_err(|e| PdfError::OcrError(format!("OCR prepare: {}", e)))?;
 
         let word_rects = self
             .engine
             .detect_words(&input)
-            .map_err(|e| PdfError::Other(format!("OCR detect: {}", e)))?;
+            .map_err(|e| PdfError::OcrError(format!("OCR detect: {}", e)))?;
 
         let lines = self.engine.find_text_lines(&input, &word_rects);
 
         let text_lines = self
             .engine
             .recognize_text(&input, &lines)
-            .map_err(|e| PdfError::Other(format!("OCR recognize: {}", e)))?;
+            .map_err(|e| PdfError::OcrError(format!("OCR recognize: {}", e)))?;
 
         let mut words = Vec::new();
         for (line_rects, text_line) in lines.iter().zip(text_lines.iter()) {

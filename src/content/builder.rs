@@ -87,6 +87,24 @@ impl ContentStreamBuilder {
         self
     }
 
+    /// Shows raw bytes as a text string (`Tj`).
+    ///
+    /// Use this for pre-encoded text (e.g., WinAnsiEncoding bytes) where
+    /// the caller has already mapped Unicode to the font's encoding.
+    pub fn show_text_bytes(&mut self, bytes: &[u8]) -> &mut Self {
+        self.buf.push('(');
+        for &b in bytes {
+            match b {
+                b'(' => self.buf.push_str("\\("),
+                b')' => self.buf.push_str("\\)"),
+                b'\\' => self.buf.push_str("\\\\"),
+                _ => self.buf.push(b as char),
+            }
+        }
+        self.buf.push_str(") Tj\n");
+        self
+    }
+
     /// Shows text with individual glyph positioning (`TJ`).
     pub fn show_text_adjusted(&mut self, items: &[TextItem<'_>]) -> &mut Self {
         self.buf.push('[');
@@ -306,6 +324,35 @@ impl ContentStreamBuilder {
         self.buf.push('/');
         write_name(&mut self.buf, name);
         self.buf.push_str(" Do\n");
+        self
+    }
+
+    // --- Marked content operators (ISO 32000-2, Section 14.6) ---
+
+    /// Begins a marked content sequence with a tag (`BMC`).
+    ///
+    /// Used for simple markers like `/Artifact BMC ... EMC`.
+    pub fn begin_marked_content(&mut self, tag: &str) -> &mut Self {
+        self.buf.push('/');
+        write_name(&mut self.buf, tag);
+        self.buf.push_str(" BMC\n");
+        self
+    }
+
+    /// Begins a marked content sequence with a tag and properties (`BDC`).
+    ///
+    /// Used for structure elements: `/P <</MCID 0>> BDC ... EMC`.
+    pub fn begin_marked_content_with_properties(&mut self, tag: &str, mcid: u32) -> &mut Self {
+        self.buf.push('/');
+        write_name(&mut self.buf, tag);
+        let _ = write!(self.buf, " <</MCID {}>> BDC", mcid);
+        self.buf.push('\n');
+        self
+    }
+
+    /// Ends a marked content sequence (`EMC`).
+    pub fn end_marked_content(&mut self) -> &mut Self {
+        self.buf.push_str("EMC\n");
         self
     }
 

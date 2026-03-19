@@ -32,10 +32,10 @@ jpeg2000 = ["dep:jpeg2k"]
 ## Enable OCR for image-only PDF accessibility. Pure Rust via ocrs + RTen.
 ## Models (~10MB) must be downloaded separately — see OcrsEngine docs.
 ocr = ["dep:ocrs", "dep:rten"]
+## Enable native Windows OCR engine via WinRT (Windows 10+ only).
+## Replaces the PowerShell subprocess approach with direct API calls.
+ocr-windows-native = ["dep:windows", "dep:windows-future"]
 
-## Enable PaddleOCR engine. Pure Rust via tract-onnx. Multi-language, higher accuracy.
-## Requires PP-OCRv4 ONNX models (~10MB) — see PaddleOcrEngine docs.
-ocr-paddle = ["dep:tract-onnx"]
 
 [dependencies]
 # Core parsing and serialization
@@ -88,9 +88,9 @@ tiny-skia = "0.11"
 # OCR (optional — enabled by "ocr" feature)
 ocrs = { version = "0.11", optional = true }
 rten = { version = "0.22", optional = true }
+windows = { version = "0.62", features = ["Media_Ocr", "Graphics_Imaging", "Globalization", "Storage_Streams", "Foundation_Collections", "Foundation"], optional = true }
+windows-future = { version = "0.3", optional = true }
 
-# PaddleOCR (optional — enabled by "ocr-paddle" feature)
-tract-onnx = { version = "0.21", optional = true }
 
 [dev-dependencies]
 criterion = "0.5"

@@ -86,6 +86,9 @@ pub enum PdfError {
     /// Encoding error
     EncodingError(String),
 
+    /// OCR processing error
+    OcrError(String),
+
     /// Generic error with a message
     Other(String),
 }
@@ -120,6 +123,7 @@ impl fmt::Display for PdfError {
             PdfError::XRefError(msg) => write!(f, "Cross-reference error: {}", msg),
             PdfError::CompressionError(msg) => write!(f, "Compression error: {}", msg),
             PdfError::EncodingError(msg) => write!(f, "Encoding error: {}", msg),
+            PdfError::OcrError(msg) => write!(f, "OCR error: {}", msg),
             PdfError::Other(msg) => write!(f, "Error: {}", msg),
         }
     }
