@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        rust: [stable]
+        include:
+          - os: ubuntu-latest
+            rust: nightly
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.rust }}-
+
+      - name: Check formatting
+        # working-directory at repo root
+        run: cargo fmt --check
+
+      - name: Clippy
+        # working-directory at repo root
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        # working-directory at repo root
+        run: cargo test
+
+      - name: Run doc tests
+        # working-directory at repo root
+        run: cargo test --doc
+
+      - name: Build docs
+        # working-directory at repo root
+        run: cargo doc --no-deps
+
+  fuzz:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Verify fuzz targets compile
+        # working-directory at repo root
+        run: cargo +nightly fuzz check
+
+      - name: Fuzz document parser (60s smoke test)
+        # working-directory at repo root
+        run: cargo +nightly fuzz run fuzz_document -- -max_total_time=60 -max_len=65536
+
+      - name: Fuzz content stream tokenizer (30s)
+        # working-directory at repo root
+        run: cargo +nightly fuzz run fuzz_content_stream -- -max_total_time=30 -max_len=4096
+
+      - name: Fuzz object parser (30s)
+        # working-directory at repo root
+        run: cargo +nightly fuzz run fuzz_object -- -max_total_time=30 -max_len=4096
+
+  bench:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: bench-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run benchmarks
+        # working-directory at repo root
+        run: cargo bench -- --output-format bencher 2>&1 | tee bench-results.txt
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-results
+          path: bench-results.txt

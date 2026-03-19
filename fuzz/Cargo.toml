@@ -1,0 +1,31 @@
+[package]
+name = "pdfpurr-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.pdfpurr]
+path = ".."
+
+[[bin]]
+name = "fuzz_document"
+path = "fuzz_targets/fuzz_document.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_content_stream"
+path = "fuzz_targets/fuzz_content_stream.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_object"
+path = "fuzz_targets/fuzz_object.rs"
+doc = false
+
+[workspace]

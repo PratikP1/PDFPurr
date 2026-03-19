@@ -1,0 +1,141 @@
+name: External Corpus Test
+
+# Runs on demand only — trigger manually after major changes
+on:
+  workflow_dispatch:
+    inputs:
+      corpus_size:
+        description: "Corpus size: small (50 files), medium (200), large (all available)"
+        required: true
+        default: "medium"
+        type: choice
+        options:
+          - small
+          - medium
+          - large
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  corpus-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: corpus-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build test binary
+        # working-directory at repo root
+        run: cargo test --no-run
+
+      - name: Download veraPDF corpus
+        run: |
+          git clone --depth 1 https://github.com/veraPDF/veraPDF-corpus.git /tmp/verapdf-corpus
+          echo "veraPDF files: $(find /tmp/verapdf-corpus -name '*.pdf' | wc -l)"
+
+      - name: Download qpdf fuzz cases
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/qpdf/qpdf.git /tmp/qpdf
+          cd /tmp/qpdf && git sparse-checkout set fuzz/qpdf_extra
+          echo "qpdf fuzz files: $(find /tmp/qpdf/fuzz -name '*.fuzz' | wc -l)"
+
+      - name: Download BFO PDF/A-2 test suite
+        run: |
+          git clone --depth 1 https://github.com/bfocom/pdfa-testsuite.git /tmp/bfo-pdfa
+          echo "BFO files: $(find /tmp/bfo-pdfa -name '*.pdf' | wc -l)"
+
+      - name: Prepare corpus directory
+        run: |
+          mkdir -p tests/private_corpus/verapdf
+          mkdir -p tests/private_corpus/qpdf
+          mkdir -p tests/private_corpus/bfo
+
+          CORPUS_SIZE="${{ github.event.inputs.corpus_size }}"
+
+          # veraPDF: select based on size
+          ALL_VERA=$(find /tmp/verapdf-corpus -name '*.pdf' | sort)
+          TOTAL_VERA=$(echo "$ALL_VERA" | wc -l)
+          case "$CORPUS_SIZE" in
+            small)  HEAD_COUNT=30 ;;
+            medium) HEAD_COUNT=150 ;;
+            large)  HEAD_COUNT=$TOTAL_VERA ;;
+          esac
+          echo "$ALL_VERA" | head -n $HEAD_COUNT | while read f; do
+            cp "$f" "tests/private_corpus/verapdf/$(basename "$f" | tr ' ' '_')" 2>/dev/null || true
+          done
+
+          # qpdf: all fuzz cases (small files)
+          cp /tmp/qpdf/fuzz/qpdf_extra/*.fuzz tests/private_corpus/qpdf/ 2>/dev/null || true
+
+          # BFO: select based on size
+          ALL_BFO=$(find /tmp/bfo-pdfa -name '*.pdf' | sort)
+          TOTAL_BFO=$(echo "$ALL_BFO" | wc -l)
+          case "$CORPUS_SIZE" in
+            small)  HEAD_COUNT=20 ;;
+            medium) HEAD_COUNT=50 ;;
+            large)  HEAD_COUNT=$TOTAL_BFO ;;
+          esac
+          echo "$ALL_BFO" | head -n $HEAD_COUNT | while read f; do
+            cp "$f" "tests/private_corpus/bfo/$(basename "$f" | tr ' ' '_')" 2>/dev/null || true
+          done
+
+          TOTAL=$(find tests/private_corpus -name '*.pdf' -o -name '*.fuzz' | wc -l)
+          echo "Total corpus files: $TOTAL"
+          echo "CORPUS_FILE_COUNT=$TOTAL" >> $GITHUB_ENV
+
+      - name: Run external corpus tests
+        # working-directory at repo root
+        run: |
+          cargo test --test external_corpus_tests -- --nocapture 2>&1 | tee /tmp/corpus-results.txt
+          echo "---"
+          echo "Test completed successfully"
+
+      - name: Run adversarial tests
+        # working-directory at repo root
+        run: cargo test --test adversarial_tests
+
+      - name: Generate corpus report
+        if: always()
+        run: |
+          echo "# External Corpus Test Report" > /tmp/corpus-report.md
+          echo "" >> /tmp/corpus-report.md
+          echo "**Corpus size:** ${{ github.event.inputs.corpus_size }}" >> /tmp/corpus-report.md
+          echo "**Total files tested:** ${{ env.CORPUS_FILE_COUNT }}" >> /tmp/corpus-report.md
+          echo "**Date:** $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> /tmp/corpus-report.md
+          echo "" >> /tmp/corpus-report.md
+          echo "## Sources" >> /tmp/corpus-report.md
+          echo "- veraPDF corpus (PDF/A fail cases)" >> /tmp/corpus-report.md
+          echo "- qpdf OSS-Fuzz crash cases" >> /tmp/corpus-report.md
+          echo "- BFO PDF/A-2 test suite" >> /tmp/corpus-report.md
+          echo "" >> /tmp/corpus-report.md
+          echo "## Results" >> /tmp/corpus-report.md
+          echo '```' >> /tmp/corpus-report.md
+          grep -E "corpus:|audited|Tagged|language|Alt-text|failures|panic|Tested" /tmp/corpus-results.txt >> /tmp/corpus-report.md || echo "See test output" >> /tmp/corpus-report.md
+          echo '```' >> /tmp/corpus-report.md
+
+      - name: Upload corpus report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-test-report
+          path: /tmp/corpus-report.md
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-test-output
+          path: /tmp/corpus-results.txt

@@ -1,0 +1,95 @@
+[package]
+name = "pdfpurr"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+authors = ["PratikP1"]
+description = "A comprehensive pure-Rust PDF library for reading, writing, rendering, and validating PDF documents"
+repository = "https://github.com/PratikP1/PDFPurr"
+homepage = "https://github.com/PratikP1/PDFPurr"
+documentation = "https://docs.rs/pdfpurr"
+license = "MIT OR Apache-2.0"
+keywords = ["pdf", "document", "accessibility", "pdf-ua", "pdf-a"]
+categories = ["parser-implementations", "encoding", "rendering"]
+readme = "README.md"
+exclude = [
+    "tests/private_corpus/**",
+    "tests/corpus/**",
+    "fuzz/**",
+    ".github/**",
+    "CLAUDE.md",
+    "RESEARCH_REPORT.md",
+    "PROJECT_SUMMARY.md",
+]
+
+[features]
+default = ["jpeg2000"]
+
+## Enable JPEG2000 (JPX) image decoding. Pulls in C dependencies via openjpeg.
+## Disable this feature to avoid the openjpeg C build dependency.
+jpeg2000 = ["dep:jpeg2k"]
+
+[dependencies]
+# Core parsing and serialization
+nom = "7.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Compression and encoding
+flate2 = "1.0"
+lzw = "0.10"
+fax = "0.2"
+jpeg-decoder = "0.3"
+jpeg2k = { version = "0.10", optional = true }
+png = "0.17"
+
+# Cryptography
+aes = "0.8"
+cbc = "0.1"
+sha2 = "0.10"
+md5 = "0.7"
+
+# Text and encoding
+encoding_rs = "0.8"
+unicode-normalization = "0.1"
+phf = { version = "0.11", features = ["macros"] }
+
+# XML parsing (XMP metadata)
+roxmltree = "0.20"
+
+# I/O utilities
+byteorder = "1.5"
+bytes = "1.5"
+memmap2 = "0.9"
+
+# Date/time
+chrono = "0.4"
+
+# Error handling and logging
+thiserror = "1.0"
+tracing = "0.1"
+
+# Fonts
+skrifa = "0.40.0"
+read-fonts = "0.37.0"
+allsorts = "0.16.1"
+
+# Rendering
+tiny-skia = "0.11"
+
+[dev-dependencies]
+criterion = "0.5"
+proptest = "1.4"
+tempfile = "3.8"
+
+[[bench]]
+name = "pdf_bench"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
