@@ -83,7 +83,16 @@ impl EncryptionHandler {
 
         let v = encrypt_dict.get_i64("V").unwrap_or(0) as u8;
 
-        let key_length = encrypt_dict.get_i64("Length").unwrap_or(40) as usize;
+        // Derive key length from /V when /Length is missing (PDF spec defaults):
+        // V=1: 40 bits, V=2/3: 128 bits (or /Length), V=4: 128 bits, V=5: 256 bits
+        let key_length = encrypt_dict
+            .get_i64("Length")
+            .map(|l| l as usize)
+            .unwrap_or(match v {
+                0 | 1 => 40,
+                5 => 256,
+                _ => 128,
+            });
 
         let p_value = encrypt_dict
             .get_i64("P")

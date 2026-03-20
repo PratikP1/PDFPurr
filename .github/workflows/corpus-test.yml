@@ -38,7 +38,6 @@ jobs:
           key: corpus-${{ hashFiles('Cargo.lock') }}
 
       - name: Build test binary
-        # working-directory at repo root
         run: cargo test --no-run
 
       - name: Download veraPDF corpus
@@ -97,14 +96,12 @@ jobs:
           echo "CORPUS_FILE_COUNT=$TOTAL" >> $GITHUB_ENV
 
       - name: Run external corpus tests
-        # working-directory at repo root
         run: |
           cargo test --test external_corpus_tests -- --nocapture 2>&1 | tee /tmp/corpus-results.txt
           echo "---"
           echo "Test completed successfully"
 
       - name: Run adversarial tests
-        # working-directory at repo root
         run: cargo test --test adversarial_tests
 
       - name: Generate corpus report

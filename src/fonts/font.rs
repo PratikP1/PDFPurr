@@ -62,6 +62,20 @@ pub struct Font {
 }
 
 impl Font {
+    /// Creates a fallback font with default WinAnsi encoding.
+    ///
+    /// Used when a font's dictionary is corrupt or unparseable.
+    /// Text extraction will use WinAnsiEncoding, which is correct
+    /// for most Western-language PDFs.
+    pub(crate) fn default_fallback() -> Self {
+        Self {
+            name: "Unknown".to_string(),
+            subtype: FontSubtype::Type1,
+            encoding: Encoding::win_ansi(),
+            to_unicode: None,
+        }
+    }
+
     /// Returns the font's base name.
     pub fn name(&self) -> &str {
         &self.name

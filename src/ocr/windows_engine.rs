@@ -252,8 +252,26 @@ fn parse_windows_ocr_output(
     let mut words = Vec::new();
 
     // Find the words array
-    let words_start = json.find("[").unwrap_or(0);
-    let words_end = json.rfind("]").unwrap_or(json.len());
+    let words_start = match json.find('[') {
+        Some(i) => i,
+        None => {
+            return Ok(OcrResult {
+                words,
+                image_width,
+                image_height,
+            })
+        }
+    };
+    let words_end = match json.rfind(']') {
+        Some(i) => i,
+        None => {
+            return Ok(OcrResult {
+                words,
+                image_width,
+                image_height,
+            })
+        }
+    };
     if words_start >= words_end {
         return Ok(OcrResult {
             words,
@@ -267,13 +285,30 @@ fn parse_windows_ocr_output(
     // Split by },{ to get individual word objects
     for obj_str in words_str.split("},{") {
         let obj = obj_str.trim().trim_start_matches('{').trim_end_matches('}');
-        let text = extract_json_string(obj, "text").unwrap_or_default();
-        let x = extract_json_int(obj, "x").unwrap_or(0);
-        let y = extract_json_int(obj, "y").unwrap_or(0);
-        let width = extract_json_int(obj, "width").unwrap_or(0);
-        let height = extract_json_int(obj, "height").unwrap_or(0);
 
-        if !text.is_empty() {
+        // Skip entries with missing required fields instead of using defaults
+        let text = match extract_json_string(obj, "text") {
+            Some(t) if !t.is_empty() => t,
+            _ => continue,
+        };
+        let x = match extract_json_int(obj, "x") {
+            Some(v) => v,
+            None => continue,
+        };
+        let y = match extract_json_int(obj, "y") {
+            Some(v) => v,
+            None => continue,
+        };
+        let width = match extract_json_int(obj, "width") {
+            Some(v) if v > 0 => v,
+            _ => continue,
+        };
+        let height = match extract_json_int(obj, "height") {
+            Some(v) if v > 0 => v,
+            _ => continue,
+        };
+
+        {
             words.push(OcrWord {
                 text,
                 x: x as u32,

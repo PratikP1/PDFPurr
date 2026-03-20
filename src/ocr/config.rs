@@ -25,6 +25,10 @@ pub struct OcrConfig {
     /// Set to the primary language of the scanned document for correct
     /// screen reader pronunciation.
     pub language: String,
+    /// When true, strip existing OCR content before re-processing (default: false).
+    ///
+    /// Used by `redo_ocr_page` to replace a previous OCR pass with fresh results.
+    pub should_redo: bool,
 }
 
 impl Default for OcrConfig {
@@ -35,6 +39,7 @@ impl Default for OcrConfig {
             skip_text_pages: true,
             preprocess: true,
             language: "en".to_string(),
+            should_redo: false,
         }
     }
 }

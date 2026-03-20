@@ -1446,7 +1446,10 @@ impl<'a> Renderer<'a> {
             if let Some(glyph_data) = t3.glyph_stream(byte) {
                 let tokens = match tokenize_content_stream(glyph_data) {
                     Ok(t) => t,
-                    Err(_) => continue,
+                    Err(e) => {
+                        tracing::debug!("Type3 glyph {byte} tokenization failed: {e}");
+                        continue;
+                    }
                 };
 
                 // Build glyph transform: FontMatrix scaled by font_size, at text position

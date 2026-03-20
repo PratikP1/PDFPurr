@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 
 use crate::content::ContentStreamBuilder;
 use crate::core::objects::{Dictionary, Object, PdfName, PdfStream};
-use crate::error::PdfResult;
 
 use super::config::OcrConfig;
 use super::constants::PARAGRAPH_GAP_THRESHOLD;
@@ -98,10 +97,11 @@ pub fn build_ocr_text_layer(
 
     builder.end_text();
 
-    // Phase 3: Build ToUnicode CMap (skip for pure ASCII)
-    let needs_cmap = char_map.keys().any(|ch| !ch.is_ascii());
-    let to_unicode_cmap = if needs_cmap || !char_map.is_empty() {
-        build_ocr_to_unicode_cmap(&char_map, is_two_byte).ok()
+    // Phase 3: Build ToUnicode CMap — essential for text extraction.
+    // Without this CMap, screen readers and search cannot decode the
+    // custom character codes back to Unicode. The function is infallible.
+    let to_unicode_cmap = if !char_map.is_empty() {
+        Some(build_ocr_to_unicode_cmap(&char_map, is_two_byte))
     } else {
         None
     };
@@ -157,10 +157,10 @@ fn encode_text(text: &str, char_map: &BTreeMap<char, u16>, two_byte: bool) -> Ve
 ///
 /// Maps each assigned code back to its Unicode code point so that
 /// PDF viewers, screen readers, and copy/paste decode correctly.
-fn build_ocr_to_unicode_cmap(
-    char_map: &BTreeMap<char, u16>,
-    two_byte: bool,
-) -> PdfResult<PdfStream> {
+///
+/// This function is infallible — the CMap is a plain text string
+/// stored uncompressed. No I/O, no compression, no external deps.
+fn build_ocr_to_unicode_cmap(char_map: &BTreeMap<char, u16>, two_byte: bool) -> PdfStream {
     use std::fmt::Write;
 
     let hex_width = if two_byte { 4 } else { 2 };
@@ -221,10 +221,9 @@ fn build_ocr_to_unicode_cmap(
     cmap.push_str("end\n");
 
     let data = cmap.into_bytes();
-    // Store uncompressed for simplicity (CMaps are small)
     let mut dict = Dictionary::new();
     dict.insert(PdfName::new("Length"), Object::Integer(data.len() as i64));
-    Ok(PdfStream::new(dict, data))
+    PdfStream::new(dict, data)
 }
 
 /// Groups OCR words into paragraphs based on vertical proximity.

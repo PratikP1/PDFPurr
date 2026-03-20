@@ -7,6 +7,20 @@
 
 use crate::error::{PdfError, PdfResult};
 
+/// Constant-time byte comparison to prevent timing side-channel attacks
+/// on password hash validation. Always compares all bytes regardless of
+/// early mismatch, preventing an attacker from learning correct prefix bytes.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Padding string used in PDF password-based key derivation (32 bytes).
 /// ISO 32000-1:2008, Table 20.
 const PADDING: [u8; 32] = [
@@ -43,6 +57,13 @@ impl EncryptionKey {
         encrypt_metadata: bool,
     ) -> PdfResult<Self> {
         let key_bytes = key_length / 8;
+
+        // R2-R4 uses MD5 which produces 16 bytes max
+        if key_bytes > 16 {
+            return Err(crate::error::PdfError::EncryptionError(format!(
+                "Key length {key_length} bits exceeds MD5 maximum (128 bits) for R2-R4 encryption"
+            )));
+        }
 
         // Step a: Pad or truncate the password to exactly 32 bytes
         let mut padded = Vec::with_capacity(32);
@@ -100,7 +121,7 @@ impl EncryptionKey {
             2 => {
                 // Algorithm 4: RC4-encrypt the padding with the key
                 let computed_u = super::rc4::rc4(&self.key, &PADDING);
-                computed_u == u_value
+                constant_time_eq(&computed_u, u_value)
             }
             3 | 4 => {
                 // Algorithm 5:
@@ -120,7 +141,7 @@ impl EncryptionKey {
                 }
 
                 // Compare first 16 bytes only (rest is random padding)
-                result[..16] == u_value[..16]
+                constant_time_eq(&result[..16], &u_value[..16])
             }
             _ => false,
         }
@@ -194,7 +215,7 @@ pub fn validate_user_password_r5_r6(password: &[u8], u_value: &[u8], revision: u
         &[],
         revision,
     );
-    computed == u_value[..HASH_LEN]
+    constant_time_eq(&computed, &u_value[..HASH_LEN])
 }
 
 /// Validates an owner password for R5 or R6.
@@ -217,7 +238,7 @@ pub fn validate_owner_password_r5_r6(
         u_value,
         revision,
     );
-    computed == o_value[..HASH_LEN]
+    constant_time_eq(&computed, &o_value[..HASH_LEN])
 }
 
 /// Derives the 32-byte file encryption key for R5/R6 (user password path).

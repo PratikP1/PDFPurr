@@ -324,8 +324,6 @@ mod tests {
 
     #[test]
     fn structure_elements_link_to_mcids() {
-        use crate::core::objects::DictExt;
-
         let mut doc = Document::new();
         doc.add_page(612.0, 792.0).unwrap();
 

@@ -134,11 +134,17 @@ fn parse_byte_range(obj: &Object) -> PdfResult<ByteRange> {
         )));
     }
 
+    let to_usize = |obj: &Object, name: &str| -> PdfResult<usize> {
+        obj.as_i64().map(|v| v as usize).ok_or_else(|| {
+            PdfError::InvalidStructure(format!("ByteRange {name} is not an integer"))
+        })
+    };
+
     Ok(ByteRange {
-        offset1: arr[0].as_i64().unwrap_or(0) as usize,
-        length1: arr[1].as_i64().unwrap_or(0) as usize,
-        offset2: arr[2].as_i64().unwrap_or(0) as usize,
-        length2: arr[3].as_i64().unwrap_or(0) as usize,
+        offset1: to_usize(&arr[0], "offset1")?,
+        length1: to_usize(&arr[1], "length1")?,
+        offset2: to_usize(&arr[2], "offset2")?,
+        length2: to_usize(&arr[3], "length2")?,
     })
 }
 

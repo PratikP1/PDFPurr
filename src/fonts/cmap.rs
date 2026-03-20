@@ -312,7 +312,14 @@ fn hex_string_to_bytes(hex: &str) -> PdfResult<Vec<u8>> {
 }
 
 /// Converts hex bytes (big-endian UTF-16BE) to a Unicode string.
+///
+/// Returns the Unicode replacement character `\u{FFFD}` for malformed
+/// sequences rather than silently returning an empty string, so that
+/// the presence of the character is preserved even if its identity is lost.
 fn hex_bytes_to_unicode(bytes: &[u8]) -> String {
+    /// Fallback for malformed CMap Unicode targets.
+    const REPLACEMENT: &str = "\u{FFFD}";
+
     if bytes.is_empty() {
         return String::new();
     }
@@ -320,10 +327,16 @@ fn hex_bytes_to_unicode(bytes: &[u8]) -> String {
         // Single byte — treat as direct Unicode codepoint
         return char::from_u32(bytes[0] as u32)
             .map(|c| c.to_string())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::debug!("Invalid single-byte codepoint in CMap: 0x{:02X}", bytes[0]);
+                REPLACEMENT.to_string()
+            });
     }
 
-    decode_utf16be(bytes).unwrap_or_default()
+    decode_utf16be(bytes).unwrap_or_else(|| {
+        tracing::debug!("Failed to decode UTF-16BE in CMap: {:02X?}", bytes);
+        REPLACEMENT.to_string()
+    })
 }
 
 /// Computes the offset between two byte sequences of equal length,

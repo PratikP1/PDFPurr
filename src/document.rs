@@ -256,8 +256,15 @@ impl Document {
             }
         };
 
-        // The newest trailer (last in chain) is the authoritative one
-        let trailer = xref_chain.last().unwrap().1.clone();
+        // The newest trailer (last in chain) is the authoritative one.
+        // SAFETY: xref_chain is always non-empty — either load_xref_chain
+        // returns Ok with ≥1 entry, or rebuild_xref_from_scan wraps its
+        // result in vec![(...)]. But we use ok_or to avoid the unwrap.
+        let trailer = xref_chain
+            .last()
+            .ok_or_else(|| PdfError::InvalidStructure("Empty xref chain".to_string()))?
+            .1
+            .clone();
 
         // 3. Load objects from all xref sections (oldest first → newer overrides).
         //    Type 1 entries (uncompressed) are loaded directly from byte offsets.
@@ -306,7 +313,13 @@ impl Document {
                             };
                             objects.insert(id, indirect_obj.object);
                         }
-                        Err(_) => continue,
+                        Err(e) => {
+                            tracing::debug!(
+                                "Skipping malformed object at offset {}: {e}",
+                                entry.offset
+                            );
+                            continue;
+                        }
                     }
                 }
             }
@@ -391,7 +404,12 @@ impl Document {
                 .and_then(|o| o.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|o| o.as_pdf_string().map(|s| s.bytes.clone()))
-                .unwrap_or_default();
+                .ok_or_else(|| {
+                    PdfError::EncryptionError(
+                        "Encrypted PDF missing /ID in trailer (required for key derivation)"
+                            .to_string(),
+                    )
+                })?;
 
             let handler = crate::encryption::EncryptionHandler::from_dict(
                 &encrypt_dict,
@@ -775,10 +793,14 @@ impl Document {
                     Ok(font) => {
                         fonts.insert(name.as_str().to_string(), font);
                     }
-                    Err(_) => {
-                        // Font parsing failed; skip this font and fall back
-                        // to basic encoding for text using it.
-                        continue;
+                    Err(e) => {
+                        // Font parsing failed — log and insert a default font
+                        // so text extraction still works (with default encoding).
+                        tracing::debug!(
+                            "Font '{}' failed to parse: {e}. Using default encoding.",
+                            name.as_str()
+                        );
+                        fonts.insert(name.as_str().to_string(), Font::default_fallback());
                     }
                 }
             }
@@ -798,45 +820,103 @@ impl Document {
     /// found in the page's `/Resources/XObject` dictionary.
     /// Images that fail to parse are silently skipped.
     pub fn page_images(&self, page_dict: &Dictionary) -> Vec<(String, PdfImage)> {
-        let resources = match self.page_resources(page_dict) {
-            Some(r) => r,
-            None => return Vec::new(),
-        };
-
-        let xobject_entry = match resources.get_str("XObject") {
-            Some(obj) => obj,
-            None => return Vec::new(),
-        };
-
-        let xobject_dict = match self.resolve(xobject_entry).and_then(|o| o.as_dict()) {
-            Some(d) => d,
-            None => return Vec::new(),
-        };
-
         let mut images = Vec::new();
-        for (name, xobj_ref) in xobject_dict {
-            let xobj = match self.resolve(xobj_ref) {
-                Some(obj) => obj,
-                None => continue,
-            };
 
-            let stream = match xobj.as_stream() {
-                Some(s) => s,
-                None => continue,
-            };
+        // Extract XObject images from page resources
+        if let Some(resources) = self.page_resources(page_dict) {
+            if let Some(xobject_entry) = resources.get_str("XObject") {
+                if let Some(xobject_dict) = self.resolve(xobject_entry).and_then(|o| o.as_dict()) {
+                    for (name, xobj_ref) in xobject_dict {
+                        let xobj = match self.resolve(xobj_ref) {
+                            Some(obj) => obj,
+                            None => continue,
+                        };
 
-            // Only extract /Subtype /Image XObjects
-            if stream.dict.get_name("Subtype") != Some("Image") {
-                continue;
+                        let stream = match xobj.as_stream() {
+                            Some(s) => s,
+                            None => continue,
+                        };
+
+                        // Only extract /Subtype /Image XObjects
+                        if stream.dict.get_name("Subtype") != Some("Image") {
+                            continue;
+                        }
+
+                        match PdfImage::from_stream(stream) {
+                            Ok(img) => images.push((name.as_str().to_string(), img)),
+                            Err(e) => {
+                                tracing::debug!("Skipping image '{}': {e}", name.as_str());
+                                continue;
+                            }
+                        }
+                    }
+                }
             }
+        }
 
-            match PdfImage::from_stream(stream) {
-                Ok(img) => images.push((name.as_str().to_string(), img)),
-                Err(_) => continue,
+        // Also extract inline images from the content stream (BI ... ID ... EI)
+        if let Ok(content_data) = self.page_content_bytes(page_dict) {
+            let inline_images = extract_inline_images(&content_data);
+            for (idx, img) in inline_images.into_iter().enumerate() {
+                images.push((format!("Inline{}", idx), img));
             }
         }
 
         images
+    }
+
+    /// Reads and concatenates all content stream bytes for a page.
+    ///
+    /// Decodes each content stream. If decoding fails, falls back to the
+    /// raw (possibly compressed) stream data — partial content is better
+    /// than silent data loss.
+    fn page_content_bytes(&self, page_dict: &Dictionary) -> PdfResult<Vec<u8>> {
+        let contents = page_dict
+            .get(&PdfName::new("Contents"))
+            .ok_or_else(|| PdfError::InvalidStructure("No /Contents on page".to_string()))?;
+
+        let mut result = Vec::new();
+        match contents {
+            Object::Reference(r) => {
+                if let Some(Object::Stream(s)) = self.get_object(r.id()) {
+                    match s.decode_data() {
+                        Ok(data) => result.extend_from_slice(&data),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Content stream {:?} decode failed ({e}), using raw bytes",
+                                r.id()
+                            );
+                            result.extend_from_slice(&s.data);
+                        }
+                    }
+                }
+            }
+            Object::Array(refs) => {
+                for item in refs {
+                    if let Object::Reference(r) = item {
+                        if let Some(Object::Stream(s)) = self.get_object(r.id()) {
+                            match s.decode_data() {
+                                Ok(data) => {
+                                    result.extend_from_slice(&data);
+                                    result.push(b'\n');
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Content stream {:?} decode failed ({e}), using raw bytes",
+                                        r.id()
+                                    );
+                                    result.extend_from_slice(&s.data);
+                                    result.push(b'\n');
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(result)
     }
 
     /// Extracts all images from all pages.
@@ -1965,6 +2045,38 @@ impl Document {
     }
 }
 
+/// Extracts inline images from PDF content stream data.
+///
+/// Parses `BI <params> ID <data> EI` sequences and returns PdfImage objects.
+/// ISO 32000-2:2020, Section 8.9.7 (Inline Images).
+/// Extracts inline images from PDF content stream data.
+///
+/// Parses `BI <params> ID <data> EI` sequences. Malformed inline images
+/// are skipped (logged at debug level) but tokenization errors propagate.
+fn extract_inline_images(data: &[u8]) -> Vec<PdfImage> {
+    use crate::content::operators::ContentToken;
+
+    let tokens = match crate::content::operators::tokenize_content_stream(data) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!("Content stream tokenization failed for inline image extraction: {e}");
+            return Vec::new();
+        }
+    };
+    let mut images = Vec::new();
+
+    for token in &tokens {
+        if let ContentToken::InlineImage { dict, data, .. } = token {
+            match PdfImage::from_inline(dict, data.clone()) {
+                Ok(img) => images.push(img),
+                Err(e) => tracing::debug!("Skipping malformed inline image: {e}"),
+            }
+        }
+    }
+
+    images
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2364,6 +2476,61 @@ mod tests {
         let doc = Document::from_bytes(&pdf).unwrap();
         let page = doc.get_page(0).unwrap();
         assert!(doc.page_images(page).is_empty());
+    }
+
+    #[test]
+    fn page_images_finds_inline_images() {
+        // Create a page with an inline image (BI ... ID ... EI)
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        // Inline image: 2x2 RGB pixels (12 bytes of data)
+        let content = b"BI\n/W 2\n/H 2\n/CS /RGB\n/BPC 8\nID\n\xFF\x00\x00\x00\xFF\x00\x00\x00\xFF\xFF\xFF\x00\nEI\n";
+        doc.append_content_stream(0, content, None).unwrap();
+
+        // Verify content was added
+        let page = doc.get_page(0).unwrap();
+        assert!(
+            page.get(&PdfName::new("Contents")).is_some(),
+            "Page should have /Contents after append"
+        );
+
+        // Verify content bytes can be read
+        let bytes = doc.page_content_bytes(page);
+        assert!(
+            bytes.is_ok(),
+            "page_content_bytes should work: {:?}",
+            bytes.err()
+        );
+        let bytes = bytes.unwrap();
+        assert!(!bytes.is_empty(), "Content bytes should not be empty");
+
+        // Verify tokenizer finds inline image
+        let tokens = crate::content::operators::tokenize_content_stream(&bytes).unwrap();
+        let inline_count = tokens
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t,
+                    crate::content::operators::ContentToken::InlineImage { .. }
+                )
+            })
+            .count();
+        assert!(
+            inline_count > 0,
+            "Tokenizer should find inline image, got {} tokens total: {:?}",
+            tokens.len(),
+            tokens
+                .iter()
+                .map(|t| format!("{:?}", std::mem::discriminant(t)))
+                .collect::<Vec<_>>()
+        );
+
+        let images = doc.page_images(page);
+        assert!(
+            !images.is_empty(),
+            "page_images should find inline images, got 0"
+        );
     }
 
     // --- Serialization tests ---

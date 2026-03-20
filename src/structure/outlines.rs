@@ -84,7 +84,9 @@ impl Outline {
         }
         let mut outlines = Vec::new();
         let mut current_dict = first_dict;
-        // Safety limit to prevent infinite loops
+        // Cycle detection: track visited object IDs to prevent infinite loops
+        // on circular /Next chains. Also cap at MAX_SIBLINGS as a hard limit.
+        let mut visited = std::collections::HashSet::new();
         let mut count = 0;
         const MAX_SIBLINGS: usize = 10_000;
 
@@ -163,12 +165,21 @@ impl Outline {
                 flags,
             });
 
-            // Move to next sibling
+            // Move to next sibling (with cycle detection)
             match current_dict.get_str("Next") {
-                Some(next_ref) => match resolve(next_ref).and_then(|o| o.as_dict()) {
-                    Some(next_dict) => current_dict = next_dict,
-                    None => break,
-                },
+                Some(next_ref) => {
+                    // Extract object ID for cycle detection
+                    if let Object::Reference(r) = next_ref {
+                        if !visited.insert(r.id()) {
+                            // Already visited this outline → circular /Next chain
+                            break;
+                        }
+                    }
+                    match resolve(next_ref).and_then(|o| o.as_dict()) {
+                        Some(next_dict) => current_dict = next_dict,
+                        None => break,
+                    }
+                }
                 None => break,
             }
         }
@@ -420,5 +431,53 @@ mod tests {
         let outlines = Outline::from_outlines_dict(&outlines_dict, &resolve);
         // GoTo action should be stored; page extracted from /D array
         assert_eq!(outlines[0].action_type, Some("GoTo".to_string()));
+    }
+
+    #[test]
+    fn circular_next_chain_terminates() {
+        use crate::core::objects::IndirectRef;
+
+        // Create outline items that form a cycle: item1 → item2 → item1
+        let mut item1 = make_dict(vec![]);
+        item1.insert(PdfName::new("Title"), str_obj("Item 1"));
+        // /Next points to object (2, 0)
+        item1.insert(
+            PdfName::new("Next"),
+            Object::Reference(IndirectRef::new(2, 0)),
+        );
+
+        let mut item2 = make_dict(vec![]);
+        item2.insert(PdfName::new("Title"), str_obj("Item 2"));
+        // /Next points back to object (1, 0) — circular!
+        item2.insert(
+            PdfName::new("Next"),
+            Object::Reference(IndirectRef::new(1, 0)),
+        );
+
+        let item1_obj = Object::Dictionary(item1.clone());
+        let item2_obj = Object::Dictionary(item2);
+
+        let mut outlines_dict = make_dict(vec![]);
+        outlines_dict.insert(PdfName::new("Type"), Object::Name(PdfName::new("Outlines")));
+        outlines_dict.insert(
+            PdfName::new("First"),
+            Object::Reference(IndirectRef::new(1, 0)),
+        );
+
+        let resolve = |obj: &Object| -> Option<&Object> {
+            match obj {
+                Object::Reference(r) if r.id() == (1, 0) => Some(&item1_obj),
+                Object::Reference(r) if r.id() == (2, 0) => Some(&item2_obj),
+                _ => None,
+            }
+        };
+
+        let outlines = Outline::from_outlines_dict(&outlines_dict, &resolve);
+        // Should terminate with exactly 2 items (cycle detected on third visit)
+        assert!(
+            outlines.len() <= 3,
+            "Circular chain should terminate early, got {} items",
+            outlines.len()
+        );
     }
 }

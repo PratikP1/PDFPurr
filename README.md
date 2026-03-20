@@ -1,13 +1,13 @@
 # PDFPurr
 
-**The ultimate pure-Rust PDF library**
+**A pure-Rust PDF library**
 
 [![CI](https://github.com/PratikP1/PDFPurr/actions/workflows/ci.yml/badge.svg)](https://github.com/PratikP1/PDFPurr/actions)
 [![crates.io](https://img.shields.io/crates/v/pdfpurr.svg)](https://crates.io/crates/pdfpurr)
 [![docs.rs](https://docs.rs/pdfpurr/badge.svg)](https://docs.rs/pdfpurr)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-PDFPurr is a comprehensive PDF library for Rust that reads, writes, edits, renders, OCRs, and validates PDF documents. It supports PDF 1.0 through 2.0, with first-class support for accessibility (PDF/UA), archival (PDF/A), and print production (PDF/X) standards.
+PDFPurr reads, writes, edits, renders, OCRs, and validates PDF documents in Rust. It supports PDF 1.0 through 2.0 with accessibility (PDF/UA), archival (PDF/A), and print production (PDF/X) standards.
 
 1000+ tests across unit, integration, adversarial, property-based, and fuzz testing. CI runs on Ubuntu, macOS, and Windows with nightly clippy and libFuzzer smoke tests.
 

@@ -313,13 +313,29 @@ pub(crate) fn build_to_unicode_cmap(
         for chunk in mappings.chunks(100) {
             let _ = writeln!(cmap, "{} beginbfchar", chunk.len());
             for &(gid, ch) in chunk {
-                let _ = writeln!(
-                    cmap,
-                    "<{:0>width$X}> <{:04X}>",
-                    gid,
-                    ch as u32,
-                    width = hex_width
-                );
+                let unicode = ch as u32;
+                if unicode > 0xFFFF {
+                    // Non-BMP: encode as UTF-16 surrogate pair
+                    let u = unicode - 0x10000;
+                    let high = 0xD800 + (u >> 10);
+                    let low = 0xDC00 + (u & 0x3FF);
+                    let _ = writeln!(
+                        cmap,
+                        "<{:0>width$X}> <{:04X}{:04X}>",
+                        gid,
+                        high,
+                        low,
+                        width = hex_width
+                    );
+                } else {
+                    let _ = writeln!(
+                        cmap,
+                        "<{:0>width$X}> <{:04X}>",
+                        gid,
+                        unicode,
+                        width = hex_width
+                    );
+                }
             }
             cmap.push_str("endbfchar\n");
         }

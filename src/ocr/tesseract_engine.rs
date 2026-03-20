@@ -149,10 +149,23 @@ pub fn parse_tesseract_tsv(tsv: &str, image_width: u32, image_height: u32) -> Pd
             continue; // Only word-level entries
         }
 
-        let left: u32 = fields[6].parse().unwrap_or(0);
-        let top: u32 = fields[7].parse().unwrap_or(0);
-        let width: u32 = fields[8].parse().unwrap_or(0);
-        let height: u32 = fields[9].parse().unwrap_or(0);
+        // Skip rows with non-numeric coordinate fields
+        let left: u32 = match fields[6].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let top: u32 = match fields[7].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let width: u32 = match fields[8].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let height: u32 = match fields[9].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         let conf: f32 = fields[10].parse().unwrap_or(-1.0);
         let text = fields[11].trim();
 

@@ -41,11 +41,9 @@ jobs:
             ${{ runner.os }}-cargo-${{ matrix.rust }}-
 
       - name: Check formatting
-        # working-directory at repo root
         run: cargo fmt --check
 
       - name: Clippy
-        # working-directory at repo root
         run: cargo clippy -- -D warnings
 
       - name: Install Tesseract (Ubuntu)
@@ -68,20 +66,16 @@ jobs:
         run: tesseract --version || echo "Tesseract not in PATH"
 
       - name: Run tests
-        # working-directory at repo root
         run: cargo test
 
       - name: Run doc tests
-        # working-directory at repo root
         run: cargo test --doc
 
       - name: Build docs
-        # working-directory at repo root
         run: cargo doc --no-deps
 
       - name: Run OCR tests with native Windows OCR
         if: runner.os == 'Windows'
-        # working-directory at repo root
         run: cargo test --features ocr-windows-native
 
   fuzz:
@@ -97,19 +91,15 @@ jobs:
         run: cargo install cargo-fuzz
 
       - name: Verify fuzz targets compile
-        # working-directory at repo root
         run: cargo +nightly fuzz check
 
       - name: Fuzz document parser (60s smoke test)
-        # working-directory at repo root
         run: cargo +nightly fuzz run fuzz_document -- -max_total_time=60 -max_len=65536
 
       - name: Fuzz content stream tokenizer (30s)
-        # working-directory at repo root
         run: cargo +nightly fuzz run fuzz_content_stream -- -max_total_time=30 -max_len=4096
 
       - name: Fuzz object parser (30s)
-        # working-directory at repo root
         run: cargo +nightly fuzz run fuzz_object -- -max_total_time=30 -max_len=4096
 
   bench:
@@ -131,7 +121,6 @@ jobs:
           key: bench-${{ hashFiles('Cargo.lock') }}
 
       - name: Run benchmarks
-        # working-directory at repo root
         run: cargo bench -- --output-format bencher 2>&1 | tee bench-results.txt
 
       - name: Upload benchmark results

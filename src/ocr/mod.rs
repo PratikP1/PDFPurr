@@ -368,13 +368,97 @@ mod tests {
         let count = doc.ocr_all_pages(&engine, &config).unwrap();
         assert_eq!(count, 2, "Should OCR both blank pages");
     }
+
+    #[test]
+    fn redo_ocr_replaces_existing_ocr_text() {
+        use crate::Document;
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        // First OCR pass
+        let engine1 = MockOcrEngine {
+            words: vec![OcrWord {
+                text: "FirstPass".to_string(),
+                x: 100,
+                y: 100,
+                width: 200,
+                height: 40,
+                confidence: 0.9,
+            }],
+        };
+        doc.ocr_page(0, &engine1, &OcrConfig::default()).unwrap();
+
+        let text1 = doc.extract_page_text(0).unwrap_or_default();
+        assert!(text1.contains("FirstPass"), "First OCR should work");
+
+        // Redo OCR with different text
+        let engine2 = MockOcrEngine {
+            words: vec![OcrWord {
+                text: "SecondPass".to_string(),
+                x: 100,
+                y: 100,
+                width: 200,
+                height: 40,
+                confidence: 0.95,
+            }],
+        };
+        let config = OcrConfig {
+            should_redo: true,
+            ..Default::default()
+        };
+        let applied = doc.redo_ocr_page(0, &engine2, &config).unwrap();
+        assert!(applied, "Redo should apply");
+
+        let text2 = doc.extract_page_text(0).unwrap_or_default();
+        assert!(
+            text2.contains("SecondPass"),
+            "Redo should produce new text, got: {:?}",
+            text2
+        );
+        assert!(
+            !text2.contains("FirstPass"),
+            "Old OCR text should be gone, got: {:?}",
+            text2
+        );
+    }
+
+    #[test]
+    fn ocr_rotated_page_produces_text() {
+        use crate::Document;
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+        doc.rotate_page(0, 90).unwrap();
+
+        let engine = MockOcrEngine {
+            words: vec![OcrWord {
+                text: "Rotated".to_string(),
+                x: 100,
+                y: 100,
+                width: 200,
+                height: 40,
+                confidence: 0.9,
+            }],
+        };
+
+        let applied = doc.ocr_page(0, &engine, &OcrConfig::default()).unwrap();
+        assert!(applied);
+
+        let text = doc.extract_page_text(0).unwrap_or_default();
+        assert!(
+            text.contains("Rotated"),
+            "Rotated page OCR should work, got: {:?}",
+            text
+        );
+    }
 }
 
 // --- Document integration ---
 
 use crate::core::objects::{Dictionary, Object, PdfName};
 use crate::document::Document;
-use crate::error::PdfResult;
+use crate::error::{PdfError, PdfResult};
 use crate::rendering::{RenderOptions, Renderer};
 
 impl Document {
@@ -489,5 +573,137 @@ impl Document {
         }
 
         Ok(ocr_count)
+    }
+
+    /// Strips existing OCR content and re-runs OCR on a page.
+    ///
+    /// Removes the OCR content stream (identified by the `F_OCR` font)
+    /// and the `F_OCR` font resource, then runs OCR fresh. Use this when
+    /// a previous OCR pass produced poor results and you want to try
+    /// with a different engine or settings.
+    pub fn redo_ocr_page(
+        &mut self,
+        page_index: usize,
+        engine: &dyn OcrEngine,
+        config: &OcrConfig,
+    ) -> PdfResult<bool> {
+        self.strip_ocr_content(page_index)?;
+
+        // Run OCR without skip_text_pages (we just stripped)
+        let mut redo_config = config.clone();
+        redo_config.skip_text_pages = false;
+        self.ocr_page(page_index, engine, &redo_config)
+    }
+
+    /// Removes OCR-generated content from a page.
+    ///
+    /// Finds and removes content streams that reference `F_OCR` font,
+    /// and removes the `F_OCR` entry from the page's font resources.
+    fn strip_ocr_content(&mut self, page_index: usize) -> PdfResult<()> {
+        let page_id = self.page_object_id(page_index)?;
+
+        // Get the page's /Contents
+        let page = self
+            .get_object(page_id)
+            .and_then(|o| o.as_dict())
+            .ok_or_else(|| PdfError::InvalidStructure("Page is not a dictionary".to_string()))?;
+
+        let contents = page.get(&PdfName::new("Contents")).cloned();
+
+        // Pre-build PdfName keys to avoid repeated allocations
+        let ocr_font_name = text_layer::OCR_FONT_NAME;
+        let contents_key = PdfName::new("Contents");
+        let resources_key = PdfName::new("Resources");
+        let font_key = PdfName::new("Font");
+        let ocr_font_key = PdfName::new(ocr_font_name);
+
+        // Check if a content stream references the OCR font.
+        // Falls back to raw data if decode fails — the F_OCR string
+        // is plain ASCII and visible even in compressed data.
+        let is_ocr_stream = |stream: &crate::core::objects::PdfStream| -> bool {
+            let data = stream.decode_data().unwrap_or_else(|_| stream.data.clone());
+            String::from_utf8_lossy(&data).contains(ocr_font_name)
+        };
+
+        // Collect non-OCR content stream refs
+        let mut keep_ids: Vec<Object> = Vec::new();
+        match contents {
+            Some(Object::Array(refs)) => {
+                keep_ids.reserve(refs.len());
+                for r in &refs {
+                    if let Object::Reference(iref) = r {
+                        let is_ocr = self
+                            .get_object(iref.id())
+                            .and_then(|o| o.as_stream())
+                            .is_some_and(is_ocr_stream);
+                        if !is_ocr {
+                            keep_ids.push(r.clone());
+                        }
+                    }
+                }
+            }
+            Some(Object::Reference(r)) => {
+                let is_ocr = self
+                    .get_object(r.id())
+                    .and_then(|o| o.as_stream())
+                    .is_some_and(is_ocr_stream);
+                if !is_ocr {
+                    keep_ids.push(Object::Reference(r));
+                }
+            }
+            _ => {}
+        }
+
+        // Update page /Contents
+        let page_dict = self
+            .get_object_mut(page_id)
+            .and_then(|o| {
+                if let Object::Dictionary(d) = o {
+                    Some(d)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| PdfError::InvalidStructure("Page is not a dictionary".to_string()))?;
+
+        match keep_ids.len() {
+            0 => {
+                page_dict.remove(&contents_key);
+            }
+            1 => {
+                page_dict.insert(contents_key.clone(), keep_ids.remove(0));
+            }
+            _ => {
+                page_dict.insert(contents_key.clone(), Object::Array(keep_ids));
+            }
+        }
+
+        // Remove F_OCR from font resources (handles both indirect and inline)
+        let res_ref = page_dict.get(&resources_key).cloned();
+        if let Some(Object::Reference(r)) = res_ref {
+            if let Some(Object::Dictionary(res)) = self.get_object_mut(r.id()) {
+                if let Some(Object::Dictionary(fonts)) = res.get_mut(&font_key) {
+                    fonts.remove(&ocr_font_key);
+                }
+            }
+        } else {
+            let page_dict = self
+                .get_object_mut(page_id)
+                .and_then(|o| {
+                    if let Object::Dictionary(d) = o {
+                        Some(d)
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| PdfError::InvalidStructure("Page dict lost".to_string()))?;
+            if let Some(Object::Dictionary(res)) = page_dict.get_mut(&resources_key) {
+                if let Some(Object::Dictionary(fonts)) = res.get_mut(&font_key) {
+                    fonts.remove(&ocr_font_key);
+                }
+            }
+        }
+
+        Ok(())
     }
 }

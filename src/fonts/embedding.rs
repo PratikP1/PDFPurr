@@ -462,6 +462,40 @@ mod tests {
     }
 
     #[test]
+    fn to_unicode_cmap_non_bmp_uses_surrogate_pairs() {
+        // Non-BMP characters (U+10000+) must use UTF-16 surrogate pairs in CMap
+        // e.g., U+1F44D (👍) → <D83DDC4D> not <1F44D>
+        use std::collections::BTreeMap;
+
+        let mut char_to_gid: BTreeMap<char, u16> = BTreeMap::new();
+        let mut old_to_new: BTreeMap<u16, u16> = BTreeMap::new();
+
+        // Map emoji 👍 (U+1F44D) to glyph 1 → new glyph 1
+        char_to_gid.insert('\u{1F44D}', 1);
+        old_to_new.insert(1, 1);
+        // Map 'A' (U+0041) to glyph 2 → new glyph 2
+        char_to_gid.insert('A', 2);
+        old_to_new.insert(2, 2);
+
+        let cmap = common::build_to_unicode_cmap(&char_to_gid, &old_to_new, 1).unwrap();
+        let text = String::from_utf8(cmap.decode_data().unwrap()).unwrap();
+
+        // 'A' should be simple 4-hex-digit mapping
+        assert!(text.contains("0041"), "A should map to 0041");
+
+        // 👍 should use surrogate pair, NOT raw 5-digit code point
+        assert!(
+            !text.contains("1F44D"),
+            "Non-BMP should NOT use raw code point 1F44D"
+        );
+        assert!(
+            text.contains("D83DDC4D"),
+            "Non-BMP 👍 should use surrogate pair D83D DC4D, got:\n{}",
+            text
+        );
+    }
+
+    #[test]
     fn encode_text_truncation_detected() {
         // If a subset has new GIDs > 255, encode_text should error
         // (simple fonts are single-byte: codes 0..=255 only)
@@ -656,5 +690,141 @@ mod tests {
         let subset_bold = font_bold.subset(&['A', 'B']).unwrap();
         assert!(subset_light.glyph_count() >= 2);
         assert!(subset_bold.glyph_count() >= 2);
+    }
+
+    /// Returns CFF/OTF font data from the test fonts directory, if available.
+    fn test_cff_font_data() -> Option<Vec<u8>> {
+        // SourceCodePro-Regular.otf is a real OTF with CFF outlines
+        let paths = [
+            "tests/fonts/SourceCodePro-Regular.otf",
+            "../tests/fonts/SourceCodePro-Regular.otf",
+        ];
+        for path in &paths {
+            if let Ok(data) = std::fs::read(path) {
+                return Some(data);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn cff_font_loads_via_from_otf() {
+        let data = match test_cff_font_data() {
+            Some(d) => d,
+            None => return,
+        };
+        let font = EmbeddedFont::from_otf(&data).unwrap();
+        assert!(!font.ps_name().is_empty(), "CFF font should have PS name");
+        assert!(font.units_per_em() > 0);
+        assert!(font.ascent() > 0.0);
+        assert!(font.descent() < 0.0);
+    }
+
+    #[test]
+    fn cff_font_subsets_correctly() {
+        let data = match test_cff_font_data() {
+            Some(d) => d,
+            None => return,
+        };
+        let font = EmbeddedFont::from_otf(&data).unwrap();
+        let subset = font.subset(&['A', 'B', 'C']);
+        assert!(
+            subset.is_ok(),
+            "CFF font subsetting should work: {:?}",
+            subset.err()
+        );
+        let subset = subset.unwrap();
+        assert!(subset.glyph_count() >= 3);
+        let stream = subset.to_font_stream().unwrap();
+        assert!(stream.data.len() < data.len(), "Subset should be smaller");
+    }
+
+    #[test]
+    fn cff_font_uses_fontfile3_in_descriptor() {
+        let data = match test_cff_font_data() {
+            Some(d) => d,
+            None => return,
+        };
+        let font = EmbeddedFont::from_otf(&data).unwrap();
+        let subset = font.subset(&['X']).unwrap();
+        let desc = subset.to_font_descriptor(Object::Null);
+
+        // CFF fonts use /FontFile3, not /FontFile2
+        assert!(
+            desc.get(&PdfName::new("FontFile3")).is_some(),
+            "CFF should use FontFile3"
+        );
+        assert!(
+            desc.get(&PdfName::new("FontFile2")).is_none(),
+            "CFF should NOT use FontFile2"
+        );
+    }
+
+    #[test]
+    fn cff_font_generates_valid_dictionary() {
+        let data = match test_cff_font_data() {
+            Some(d) => d,
+            None => return,
+        };
+        let font = EmbeddedFont::from_otf(&data).unwrap();
+        let subset = font.subset(&['H', 'e', 'l', 'o']).unwrap();
+        let dict = subset.to_font_dictionary(Object::Null);
+
+        // Should have all required keys
+        assert!(dict.get(&PdfName::new("Type")).is_some());
+        assert!(dict.get(&PdfName::new("Subtype")).is_some());
+        assert!(dict.get(&PdfName::new("BaseFont")).is_some());
+        assert!(dict.get(&PdfName::new("Widths")).is_some());
+        assert!(dict.get(&PdfName::new("FirstChar")).is_some());
+        assert!(dict.get(&PdfName::new("LastChar")).is_some());
+    }
+
+    #[test]
+    fn cff_font_to_unicode_cmap_valid() {
+        let data = match test_cff_font_data() {
+            Some(d) => d,
+            None => return,
+        };
+        let font = EmbeddedFont::from_otf(&data).unwrap();
+        let subset = font.subset(&['A', '!', '@']).unwrap();
+        let cmap = subset.to_unicode_cmap();
+        assert!(cmap.is_ok(), "CFF CMap should generate: {:?}", cmap.err());
+        let cmap = cmap.unwrap();
+        let text = String::from_utf8(cmap.decode_data().unwrap()).unwrap();
+        assert!(text.contains("begincmap"));
+        assert!(text.contains("0041")); // 'A' = U+0041
+    }
+
+    #[test]
+    fn cff_font_encode_and_measure() {
+        let data = match test_cff_font_data() {
+            Some(d) => d,
+            None => return,
+        };
+        let font = EmbeddedFont::from_otf(&data).unwrap();
+        let subset = font.subset(&['H', 'e', 'l', 'o']).unwrap();
+
+        let encoded = subset.encode_text("Hello");
+        assert_eq!(encoded.len(), 5, "Hello has 5 chars");
+
+        let width = font.measure_text("Hello", 12.0).unwrap();
+        assert!(width > 0.0, "CFF text should have non-zero width");
+    }
+
+    #[test]
+    fn cff_font_stream_has_data() {
+        let data = match test_cff_font_data() {
+            Some(d) => d,
+            None => return,
+        };
+        let font = EmbeddedFont::from_otf(&data).unwrap();
+        let subset = font.subset(&['A']).unwrap();
+        let stream = subset.to_font_stream().unwrap();
+
+        assert!(!stream.data.is_empty(), "CFF font stream should have data");
+        assert!(
+            stream.dict.get(&PdfName::new("Length1")).is_some(),
+            "Should have Length1"
+        );
     }
 }

@@ -438,28 +438,42 @@ pub fn parse_xref_stream(data: &[u8]) -> PdfResult<(XRefTable, Dictionary)> {
 
     let w: Vec<usize> = w_array
         .iter()
-        .map(|o| o.as_i64().unwrap_or(0) as usize)
-        .collect();
+        .map(|o| {
+            o.as_i64()
+                .ok_or_else(|| PdfError::XRefError("/W entry is not an integer".to_string()))
+                .map(|v| v.max(0) as usize)
+        })
+        .collect::<PdfResult<Vec<usize>>>()?;
 
     let entry_size = w[0] + w[1] + w[2];
+    if entry_size == 0 {
+        return Err(PdfError::XRefError(
+            "XRef stream /W has zero entry size".to_string(),
+        ));
+    }
 
     // Get /Index (optional) — defaults to [0 Size]
-    let index_ranges = if let Some(index_obj) = stream.dict.get(&PdfName::new("Index")) {
-        let index_arr = index_obj
-            .as_array()
-            .ok_or_else(|| PdfError::XRefError("/Index must be an array".to_string()))?;
-        let mut ranges = Vec::new();
-        for pair in index_arr.chunks(2) {
-            if pair.len() == 2 {
-                let first = pair[0].as_i64().unwrap_or(0) as u32;
-                let count = pair[1].as_i64().unwrap_or(0) as usize;
-                ranges.push((first, count));
+    let index_ranges =
+        if let Some(index_obj) = stream.dict.get(&PdfName::new("Index")) {
+            let index_arr = index_obj
+                .as_array()
+                .ok_or_else(|| PdfError::XRefError("/Index must be an array".to_string()))?;
+            let mut ranges = Vec::new();
+            for pair in index_arr.chunks(2) {
+                if pair.len() == 2 {
+                    let first = pair[0].as_i64().ok_or_else(|| {
+                        PdfError::XRefError("Index first must be integer".to_string())
+                    })? as u32;
+                    let count = pair[1].as_i64().ok_or_else(|| {
+                        PdfError::XRefError("Index count must be integer".to_string())
+                    })? as usize;
+                    ranges.push((first, count));
+                }
             }
-        }
-        ranges
-    } else {
-        vec![(0, size as usize)]
-    };
+            ranges
+        } else {
+            vec![(0, size as usize)]
+        };
 
     // Decode the stream data
     let decoded = stream.decode_data()?;
@@ -545,8 +559,12 @@ pub fn parse_xref_stream(data: &[u8]) -> PdfResult<(XRefTable, Dictionary)> {
 /// Reads a big-endian integer field from xref stream data.
 ///
 /// If `width` is 0, returns `default` (per the spec).
+/// Returns `default` if the field extends beyond the data bounds.
 fn read_xref_field(data: &[u8], offset: usize, width: usize, default: u64) -> u64 {
     if width == 0 {
+        return default;
+    }
+    if offset + width > data.len() {
         return default;
     }
     let mut val: u64 = 0;
@@ -636,7 +654,14 @@ pub fn parse_object_stream(
         let obj_data = &data_section[*byte_offset..];
         match parse_object(obj_data) {
             Ok((_, obj)) => objects.push((*obj_num, obj)),
-            Err(_) => continue, // Skip malformed objects
+            Err(e) => {
+                tracing::debug!(
+                    "Xref rebuild: skipping object {} at offset {}: {e}",
+                    obj_num,
+                    byte_offset
+                );
+                continue;
+            }
         }
     }
 
@@ -1360,5 +1385,40 @@ mod tests {
             total_entries, 2,
             "should find 2 objects, ignoring stream content"
         );
+    }
+
+    // --- XRef field bounds check ---
+
+    #[test]
+    fn read_xref_field_within_bounds() {
+        let data = [0x00, 0x01, 0x02, 0x03];
+        assert_eq!(read_xref_field(&data, 0, 2, 99), 0x0001);
+        assert_eq!(read_xref_field(&data, 2, 2, 99), 0x0203);
+    }
+
+    #[test]
+    fn read_xref_field_zero_width_returns_default() {
+        let data = [0xFF];
+        assert_eq!(read_xref_field(&data, 0, 0, 42), 42);
+    }
+
+    #[test]
+    fn read_xref_field_beyond_bounds_returns_default() {
+        let data = [0x01, 0x02];
+        // Trying to read 3 bytes from 2-byte data
+        assert_eq!(read_xref_field(&data, 0, 3, 99), 99);
+        // Offset past end
+        assert_eq!(read_xref_field(&data, 5, 1, 99), 99);
+    }
+
+    #[test]
+    fn read_xref_field_exactly_at_boundary() {
+        let data = [0xAB, 0xCD];
+        // Read exactly 2 bytes from 2-byte data — should succeed
+        assert_eq!(read_xref_field(&data, 0, 2, 99), 0xABCD);
+        // Read 1 byte starting at index 1 — should succeed
+        assert_eq!(read_xref_field(&data, 1, 1, 99), 0xCD);
+        // Read 1 byte starting at index 2 — out of bounds
+        assert_eq!(read_xref_field(&data, 2, 1, 99), 99);
     }
 }

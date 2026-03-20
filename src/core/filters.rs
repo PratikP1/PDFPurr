@@ -267,17 +267,35 @@ fn apply_filter(name: &str, data: &[u8]) -> PdfResult<Vec<u8>> {
 const MAX_DECODED_SIZE: u64 = 256 * 1024 * 1024;
 
 /// Decodes FlateDecode (zlib/deflate) compressed data.
+///
+/// Tries zlib-wrapped deflate first (correct per PDF spec), then falls
+/// back to raw deflate without the 2-byte zlib header. Many real-world
+/// PDFs have incorrect or missing zlib wrappers.
 fn decode_flate(data: &[u8]) -> PdfResult<Vec<u8>> {
-    use flate2::read::ZlibDecoder;
+    use flate2::read::{DeflateDecoder, ZlibDecoder};
     use std::io::Read;
 
+    // Try 1: zlib-wrapped deflate (PDF spec conformant)
     let mut decoder = ZlibDecoder::new(data).take(MAX_DECODED_SIZE);
     let mut decoded = Vec::new();
-    decoder
-        .read_to_end(&mut decoded)
-        .map_err(|e| PdfError::CompressionError(format!("FlateDecode failed: {}", e)))?;
+    if decoder.read_to_end(&mut decoded).is_ok() {
+        return Ok(decoded);
+    }
 
-    Ok(decoded)
+    // Try 2: raw deflate without zlib header (common in malformed PDFs)
+    let mut raw_decoder = DeflateDecoder::new(data).take(MAX_DECODED_SIZE);
+    let mut raw_decoded = Vec::new();
+    if raw_decoder.read_to_end(&mut raw_decoded).is_ok() && !raw_decoded.is_empty() {
+        tracing::debug!(
+            "FlateDecode: zlib failed, raw deflate succeeded ({} bytes)",
+            raw_decoded.len()
+        );
+        return Ok(raw_decoded);
+    }
+
+    Err(PdfError::CompressionError(
+        "FlateDecode failed (tried both zlib and raw deflate)".to_string(),
+    ))
 }
 
 /// Decodes ASCIIHexDecode data: hex pairs terminated by `>`.
