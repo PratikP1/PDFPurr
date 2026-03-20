@@ -5,9 +5,7 @@
 //!
 //! ISO 32000-2:2020, Section 14.7 (Logical Structure).
 
-use crate::core::objects::{
-    Dictionary, IndirectRef, Object, ObjectId, PdfName, PdfString, StringFormat,
-};
+use crate::core::objects::{Dictionary, IndirectRef, Object, PdfName, PdfString, StringFormat};
 use crate::document::Document;
 use crate::error::PdfResult;
 use crate::ocr::engine::OcrResult;
@@ -147,7 +145,7 @@ pub fn add_tagged_structure_from_ocr(
     let struct_root_id = doc.add_object(Object::Dictionary(struct_root));
 
     // Set /StructTreeRoot, /MarkInfo, and /Lang on catalog (single access)
-    let catalog_id: ObjectId = (1, 0); // catalog is always object 1 in our docs
+    let catalog_id = doc.catalog_object_id().unwrap_or((1, 0));
     if let Some(Object::Dictionary(catalog)) = doc.get_object_mut(catalog_id) {
         catalog.insert(
             PdfName::new("StructTreeRoot"),

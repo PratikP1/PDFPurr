@@ -21,6 +21,7 @@
 pub mod config;
 pub mod constants;
 pub mod engine;
+pub mod hybrid;
 pub mod layout;
 #[cfg(feature = "ocr")]
 pub mod ocrs_engine;

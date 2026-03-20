@@ -161,7 +161,11 @@ impl Document {
             }
         };
 
-        let trailer = xref_chain.last().unwrap().1.clone();
+        let trailer = xref_chain
+            .last()
+            .ok_or_else(|| PdfError::InvalidStructure("Empty xref chain (lazy)".to_string()))?
+            .1
+            .clone();
 
         // Collect xref offsets for deferred parsing instead of loading objects
         let mut deferred_map: HashMap<ObjectId, u64> = HashMap::new();
@@ -517,6 +521,19 @@ impl Document {
     }
 
     /// Returns the document catalog dictionary.
+    /// Returns the object ID of the document catalog.
+    ///
+    /// The catalog is referenced by `/Root` in the trailer. For documents
+    /// created with `Document::new()`, this is always `(1, 0)`. For parsed
+    /// documents, it depends on the file's object numbering.
+    pub fn catalog_object_id(&self) -> Option<ObjectId> {
+        match self.trailer.get_str("Root")? {
+            Object::Reference(r) => Some(r.id()),
+            _ => None,
+        }
+    }
+
+    /// Returns the document catalog dictionary.
     pub fn catalog(&self) -> PdfResult<&Dictionary> {
         let root_ref = self
             .trailer
@@ -736,6 +753,209 @@ impl Document {
         }
 
         Ok(result)
+    }
+
+    /// Extracts positioned text runs from a page's content stream.
+    ///
+    /// Each [`TextRun`](crate::content::analysis::TextRun) captures the text,
+    /// font name/size, page-coordinate position, color, and style flags
+    /// (bold/italic/monospaced). This is the foundation for structure
+    /// detection — headings, paragraphs, lists, and tables can all be
+    /// identified from the font metrics and positions of text runs.
+    ///
+    /// Returns an empty `Vec` if the page has no content stream.
+    pub fn extract_text_runs(
+        &self,
+        page_index: usize,
+    ) -> PdfResult<Vec<crate::content::analysis::TextRun>> {
+        let page = self.get_page(page_index)?;
+        let contents = match page.get_str("Contents") {
+            Some(c) => c,
+            None => return Ok(Vec::new()),
+        };
+        let data = self.resolve_content_data(contents)?;
+        let fonts = self.page_fonts(page);
+        crate::content::analysis::extract_text_runs(&data, &fonts)
+    }
+
+    /// Analyzes the structure of a page by detecting headings, paragraphs,
+    /// and other elements from font metrics and text positions.
+    ///
+    /// This works on **native text** (from the content stream), not OCR.
+    /// For scanned documents, run OCR first, then analyze structure.
+    ///
+    /// Returns classified [`TextBlock`](crate::content::structure_detection::TextBlock)
+    /// values with roles like `Heading(1)`, `Paragraph`, `ListItem`, `Code`, etc.
+    pub fn analyze_page_structure(
+        &self,
+        page_index: usize,
+    ) -> PdfResult<Vec<crate::content::structure_detection::TextBlock>> {
+        let runs = self.extract_text_runs(page_index)?;
+        if runs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let page = self.get_page(page_index)?;
+        let media_box = self.page_media_box(page)?;
+        let page_width = media_box[2] - media_box[0];
+        let page_height = media_box[3] - media_box[1];
+        Ok(crate::content::structure_detection::classify_blocks(
+            &runs,
+            page_width,
+            page_height,
+        ))
+    }
+
+    /// Auto-tags an untagged PDF by analyzing all pages for structure.
+    ///
+    /// Detects headings, paragraphs, list items, and code blocks from
+    /// font metrics and text positions, then builds a complete
+    /// `/StructTreeRoot` with the detected structure. Sets `/MarkInfo`
+    /// and `/Lang` on the catalog.
+    ///
+    /// Does nothing if the document already has a structure tree.
+    /// Use [`check_accessibility`](Self::check_accessibility) to improve
+    /// existing tags.
+    pub fn auto_tag(&mut self, language: &str) -> PdfResult<usize> {
+        // Skip if already tagged
+        if self.structure_tree().is_some() {
+            return Ok(0);
+        }
+
+        let page_count = self.page_count()?;
+        let mut all_blocks = Vec::new();
+
+        for i in 0..page_count {
+            match self.analyze_page_structure(i) {
+                Ok(blocks) => all_blocks.extend(blocks),
+                Err(_) => continue, // Skip pages without content
+            }
+        }
+
+        if all_blocks.is_empty() {
+            return Ok(0);
+        }
+
+        crate::accessibility::auto_tag::auto_tag_from_blocks(self, &all_blocks, language)?;
+        Ok(all_blocks.len())
+    }
+
+    /// Checks accessibility quality against detected page structure.
+    ///
+    /// Compares the existing structure tree (if any) against what the
+    /// structure detection algorithms find in the content stream.
+    /// Reports issues like:
+    /// - Missing structure tree (untagged document)
+    /// - Missing document language
+    /// - Headings detected but not tagged
+    /// - Figure elements without alt text
+    /// - Heading level skips (H1 → H3 without H2)
+    pub fn check_accessibility(&self) -> Vec<crate::accessibility::auto_tag::TagIssue> {
+        use crate::accessibility::auto_tag::TagIssue;
+
+        let mut all_issues = Vec::new();
+
+        // Document-level checks (independent of page content)
+        if self.structure_tree().is_none() {
+            all_issues.push(TagIssue {
+                description: "Document has no structure tree (untagged)".to_string(),
+                suggestion: "Run auto_tag() to add tags from detected structure".to_string(),
+                severity: "error".to_string(),
+            });
+        }
+
+        let page_count = self.page_count().unwrap_or(0);
+
+        for i in 0..page_count {
+            let blocks = self.analyze_page_structure(i).unwrap_or_default();
+            let issues = crate::accessibility::auto_tag::check_tag_quality(self, &blocks, i);
+            all_issues.extend(issues);
+        }
+
+        // Deduplicate document-level issues (untagged, missing lang)
+        all_issues.sort_by(|a, b| a.description.cmp(&b.description));
+        all_issues.dedup_by(|a, b| a.description == b.description);
+
+        all_issues
+    }
+
+    /// OCRs a page and compares against existing text content.
+    ///
+    /// Returns a [`HybridResult`](crate::ocr::hybrid::HybridResult)
+    /// indicating whether the content stream text, OCR text, or both
+    /// should be presented to screen readers. When they disagree, the
+    /// accessible text contains both sources for human review.
+    ///
+    /// Use this when you suspect a PDF has garbled text encoding but
+    /// want to verify before replacing it with OCR output.
+    pub fn hybrid_ocr_page(
+        &mut self,
+        page_index: usize,
+        engine: &dyn crate::ocr::engine::OcrEngine,
+        config: &crate::ocr::OcrConfig,
+    ) -> PdfResult<crate::ocr::hybrid::HybridResult> {
+        let runs = self.extract_text_runs(page_index)?;
+
+        // Render and OCR the page
+        let page = self.get_page(page_index)?;
+        let media_box = self.page_media_box(page)?;
+        let page_width = media_box[2] - media_box[0];
+        let page_height = media_box[3] - media_box[1];
+
+        let renderer = crate::rendering::Renderer::new(
+            self,
+            crate::rendering::RenderOptions {
+                dpi: config.dpi,
+                ..Default::default()
+            },
+        );
+        let pixmap = renderer.render_page(page_index)?;
+        let grayscale = crate::ocr::pixmap_to_grayscale(&pixmap);
+        let ocr_image = if config.preprocess {
+            crate::ocr::preprocess::preprocess_for_ocr(&grayscale)
+        } else {
+            grayscale
+        };
+
+        let ocr_result = engine.recognize(&ocr_image)?;
+
+        let hybrid = crate::ocr::hybrid::compare_text_sources(&runs, &ocr_result);
+
+        // If OCR is better, apply it
+        let should_apply = hybrid.source == crate::ocr::hybrid::TextSource::Ocr
+            || hybrid.source == crate::ocr::hybrid::TextSource::Both;
+        if should_apply && !ocr_result.words.is_empty() {
+            // Apply OCR text layer
+            let layer = crate::ocr::text_layer::build_ocr_text_layer(
+                &ocr_result,
+                page_width,
+                page_height,
+                config,
+            );
+
+            let mut font_dict = Dictionary::new();
+            font_dict.insert(PdfName::new("Type"), Object::Name(PdfName::new("Font")));
+            font_dict.insert(PdfName::new("Subtype"), Object::Name(PdfName::new("Type1")));
+            font_dict.insert(
+                PdfName::new("BaseFont"),
+                Object::Name(PdfName::new("Helvetica")),
+            );
+            if let Some(cmap) = layer.to_unicode_cmap {
+                let cmap_id = self.add_object(Object::Stream(cmap));
+                font_dict.insert(
+                    PdfName::new("ToUnicode"),
+                    Object::Reference(crate::core::objects::IndirectRef::new(cmap_id.0, cmap_id.1)),
+                );
+            }
+
+            let mut fonts = Dictionary::new();
+            fonts.insert(
+                PdfName::new(crate::ocr::text_layer::OCR_FONT_NAME),
+                Object::Dictionary(font_dict),
+            );
+            self.append_content_stream(page_index, &layer.content, Some(fonts))?;
+        }
+
+        Ok(hybrid)
     }
 
     /// Returns the resource dictionary for a page, walking up the `/Parent`
@@ -1051,8 +1271,7 @@ impl Document {
 
         // Append to /Contents: convert single ref → array, or create new
         match page.get_str("Contents").cloned() {
-            Some(Object::Reference(_)) => {
-                let existing = page.get_str("Contents").cloned().unwrap();
+            Some(existing @ Object::Reference(_)) => {
                 page.insert(
                     PdfName::new("Contents"),
                     Object::Array(vec![existing, stream_ref]),
@@ -2347,6 +2566,336 @@ mod tests {
         let doc = Document::from_bytes(&pdf).unwrap();
 
         assert!(doc.extract_page_text(5).is_err());
+    }
+
+    // --- Text run extraction tests ---
+
+    #[test]
+    fn extract_text_runs_simple() {
+        let pdf = make_pdf_with_text(b"BT /F1 12 Tf 100 700 Td (Hello) Tj ET");
+        let doc = Document::from_bytes(&pdf).unwrap();
+        let runs = doc.extract_text_runs(0).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "Hello");
+        assert!((runs[0].font_size - 12.0).abs() < 0.1);
+        assert!((runs[0].x - 100.0).abs() < 1.0);
+        assert!((runs[0].y - 700.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn extract_text_runs_detects_bold() {
+        // Use Helvetica-Bold as F1
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+        let bold = crate::fonts::standard14::Standard14Font::from_name("Helvetica-Bold").unwrap();
+        let mut fonts = crate::core::objects::Dictionary::new();
+        fonts.insert(
+            PdfName::new("F1"),
+            Object::Dictionary(bold.to_font_dictionary()),
+        );
+        let content = b"BT /F1 18 Tf 100 700 Td (Title) Tj ET";
+        doc.append_content_stream(0, content, Some(fonts)).unwrap();
+
+        let runs = doc.extract_text_runs(0).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].is_bold, "Helvetica-Bold should be detected as bold");
+        assert!(!runs[0].is_italic);
+    }
+
+    #[test]
+    fn extract_text_runs_empty_page() {
+        let doc = Document::new();
+        // New page has no content — should return empty Vec, not error
+        let mut doc = doc;
+        doc.add_page(612.0, 792.0).unwrap();
+        let runs = doc.extract_text_runs(0).unwrap();
+        assert!(runs.is_empty());
+    }
+
+    #[test]
+    fn extract_text_runs_on_real_pdf() {
+        let path = std::path::Path::new("tests/corpus/basic/tracemonkey.pdf");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(path).unwrap();
+        let doc = Document::from_bytes(&data).unwrap();
+        let runs = doc.extract_text_runs(0).unwrap();
+
+        assert!(!runs.is_empty(), "tracemonkey page 0 should have text runs");
+
+        // Should have a variety of font sizes (title vs body)
+        let sizes: std::collections::HashSet<u32> =
+            runs.iter().map(|r| (r.font_size * 10.0) as u32).collect();
+        assert!(
+            sizes.len() >= 2,
+            "tracemonkey should have multiple font sizes, got {:?}",
+            sizes
+        );
+
+        // All positions should be within page bounds (612 x 792)
+        for run in &runs {
+            assert!(
+                run.x >= -10.0 && run.x <= 700.0,
+                "x={} out of page bounds for '{}'",
+                run.x,
+                run.text
+            );
+            assert!(
+                run.y >= -10.0 && run.y <= 900.0,
+                "y={} out of page bounds for '{}'",
+                run.y,
+                run.text
+            );
+        }
+    }
+
+    // --- Structure analysis tests ---
+
+    #[test]
+    fn analyze_structure_detects_headings_on_real_pdf() {
+        use crate::content::structure_detection::BlockRole;
+
+        let path = std::path::Path::new("tests/corpus/basic/tracemonkey.pdf");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(path).unwrap();
+        let doc = Document::from_bytes(&data).unwrap();
+        let blocks = doc.analyze_page_structure(0).unwrap();
+
+        assert!(!blocks.is_empty(), "tracemonkey should have blocks");
+
+        let headings: Vec<_> = blocks
+            .iter()
+            .filter(|b| matches!(b.role, BlockRole::Heading(_)))
+            .collect();
+        let paragraphs: Vec<_> = blocks
+            .iter()
+            .filter(|b| matches!(b.role, BlockRole::Paragraph))
+            .collect();
+
+        // tracemonkey has a title and body text
+        assert!(
+            !headings.is_empty(),
+            "tracemonkey should have headings (title is larger font)"
+        );
+        assert!(
+            !paragraphs.is_empty(),
+            "tracemonkey should have body paragraphs"
+        );
+    }
+
+    #[test]
+    fn analyze_structure_empty_page() {
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+        let blocks = doc.analyze_page_structure(0).unwrap();
+        assert!(blocks.is_empty());
+    }
+
+    // --- Integration method tests ---
+
+    #[test]
+    fn auto_tag_creates_structure_on_untagged_pdf() {
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        // Add text with heading and body
+        let bold = crate::fonts::standard14::Standard14Font::from_name("Helvetica-Bold").unwrap();
+        let regular = crate::fonts::standard14::Standard14Font::from_name("Helvetica").unwrap();
+        let mut fonts = crate::core::objects::Dictionary::new();
+        fonts.insert(
+            PdfName::new("F1"),
+            Object::Dictionary(bold.to_font_dictionary()),
+        );
+        fonts.insert(
+            PdfName::new("F2"),
+            Object::Dictionary(regular.to_font_dictionary()),
+        );
+
+        let content = b"BT /F1 24 Tf 100 700 Td (Big Title) Tj ET BT /F2 12 Tf 100 650 Td (Body text here) Tj ET";
+        doc.append_content_stream(0, content, Some(fonts)).unwrap();
+
+        assert!(
+            doc.structure_tree().is_none(),
+            "Should be untagged before auto_tag"
+        );
+
+        let block_count = doc.auto_tag("en-US").unwrap();
+        assert!(block_count > 0, "Should tag some blocks");
+        assert!(
+            doc.structure_tree().is_some(),
+            "Should be tagged after auto_tag"
+        );
+    }
+
+    #[test]
+    fn auto_tag_skips_already_tagged() {
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        let helv = crate::fonts::standard14::Standard14Font::from_name("Helvetica").unwrap();
+        let mut fonts = crate::core::objects::Dictionary::new();
+        fonts.insert(
+            PdfName::new("F1"),
+            Object::Dictionary(helv.to_font_dictionary()),
+        );
+        let content = b"BT /F1 12 Tf 100 700 Td (Text) Tj ET";
+        doc.append_content_stream(0, content, Some(fonts)).unwrap();
+
+        // Tag it first
+        doc.auto_tag("en").unwrap();
+
+        // Second call should skip (already tagged)
+        let count = doc.auto_tag("en").unwrap();
+        assert_eq!(count, 0, "Should skip already tagged document");
+    }
+
+    #[test]
+    fn check_accessibility_on_untagged_pdf() {
+        let doc = Document::new();
+        let issues = doc.check_accessibility();
+        assert!(
+            issues.iter().any(|i| i.description.contains("untagged")),
+            "Should report untagged"
+        );
+    }
+
+    #[test]
+    fn check_accessibility_on_tagged_pdf() {
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        let helv = crate::fonts::standard14::Standard14Font::from_name("Helvetica").unwrap();
+        let mut fonts = crate::core::objects::Dictionary::new();
+        fonts.insert(
+            PdfName::new("F1"),
+            Object::Dictionary(helv.to_font_dictionary()),
+        );
+        let content = b"BT /F1 12 Tf 100 700 Td (Text) Tj ET";
+        doc.append_content_stream(0, content, Some(fonts)).unwrap();
+
+        doc.auto_tag("en-US").unwrap();
+
+        let issues = doc.check_accessibility();
+        // Should not report untagged anymore
+        assert!(
+            !issues.iter().any(|i| i.description.contains("untagged")),
+            "Tagged doc should not report untagged"
+        );
+    }
+
+    #[test]
+    fn hybrid_ocr_with_mock_engine() {
+        use crate::ocr::engine::{OcrEngine, OcrImage, OcrResult, OcrWord};
+        use crate::ocr::OcrConfig;
+
+        struct MockEngine;
+        impl OcrEngine for MockEngine {
+            fn recognize(&self, _: &OcrImage) -> crate::error::PdfResult<OcrResult> {
+                Ok(OcrResult {
+                    words: vec![OcrWord {
+                        text: "MockText".to_string(),
+                        x: 100,
+                        y: 100,
+                        width: 200,
+                        height: 40,
+                        confidence: 0.95,
+                    }],
+                    image_width: 2550,
+                    image_height: 3300,
+                })
+            }
+        }
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        let result = doc
+            .hybrid_ocr_page(0, &MockEngine, &OcrConfig::default())
+            .unwrap();
+        // Blank page + OCR text → should prefer OCR
+        assert_eq!(
+            result.source,
+            crate::ocr::hybrid::TextSource::Ocr,
+            "Blank page should use OCR"
+        );
+        assert!(result.accessible_text.contains("MockText"));
+    }
+
+    #[test]
+    fn hybrid_ocr_on_page_with_text() {
+        use crate::ocr::engine::{OcrEngine, OcrImage, OcrResult, OcrWord};
+        use crate::ocr::OcrConfig;
+
+        struct MatchingEngine;
+        impl OcrEngine for MatchingEngine {
+            fn recognize(&self, _: &OcrImage) -> crate::error::PdfResult<OcrResult> {
+                Ok(OcrResult {
+                    words: vec![
+                        OcrWord {
+                            text: "Hello".to_string(),
+                            x: 100,
+                            y: 100,
+                            width: 100,
+                            height: 30,
+                            confidence: 0.9,
+                        },
+                        OcrWord {
+                            text: "World".to_string(),
+                            x: 250,
+                            y: 100,
+                            width: 100,
+                            height: 30,
+                            confidence: 0.9,
+                        },
+                    ],
+                    image_width: 2550,
+                    image_height: 3300,
+                })
+            }
+        }
+
+        let mut doc = Document::new();
+        doc.add_page(612.0, 792.0).unwrap();
+
+        let helv = crate::fonts::standard14::Standard14Font::from_name("Helvetica").unwrap();
+        let mut fonts = crate::core::objects::Dictionary::new();
+        fonts.insert(
+            PdfName::new("F1"),
+            Object::Dictionary(helv.to_font_dictionary()),
+        );
+        let content = b"BT /F1 12 Tf 100 700 Td (Hello World) Tj ET";
+        doc.append_content_stream(0, content, Some(fonts)).unwrap();
+
+        let result = doc
+            .hybrid_ocr_page(0, &MatchingEngine, &OcrConfig::default())
+            .unwrap();
+        // Text matches OCR → should prefer content stream
+        assert_eq!(
+            result.source,
+            crate::ocr::hybrid::TextSource::ContentStream,
+            "Matching text should prefer content stream"
+        );
+    }
+
+    #[test]
+    fn auto_tag_on_real_pdf() {
+        let path = std::path::Path::new("tests/corpus/basic/tracemonkey.pdf");
+        if !path.exists() {
+            return;
+        }
+        let data = std::fs::read(path).unwrap();
+        let mut doc = Document::from_bytes(&data).unwrap();
+
+        // auto_tag must not panic on real-world PDFs.
+        let result = doc.auto_tag("en-US");
+        assert!(
+            result.is_ok(),
+            "auto_tag should not error: {:?}",
+            result.err()
+        );
     }
 
     #[test]

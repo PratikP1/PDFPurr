@@ -85,14 +85,14 @@ impl OcrEngine for TesseractEngine {
 
         // Run tesseract: input.pgm → output.tsv
         let cmd = self.tesseract_cmd();
+        let pgm_str = pgm_path.to_str().ok_or_else(|| {
+            PdfError::OcrError("PGM path contains non-UTF-8 characters".to_string())
+        })?;
+        let tsv_str = tsv_base.to_str().ok_or_else(|| {
+            PdfError::OcrError("TSV path contains non-UTF-8 characters".to_string())
+        })?;
         let output = Command::new(cmd)
-            .args([
-                pgm_path.to_str().unwrap(),
-                tsv_base.to_str().unwrap(),
-                "-l",
-                &self.language,
-                "tsv",
-            ])
+            .args([pgm_str, tsv_str, "-l", &self.language, "tsv"])
             .output()
             .map_err(|e| {
                 PdfError::OcrError(format!("Failed to run tesseract (is it installed?): {e}"))

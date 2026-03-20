@@ -4,6 +4,7 @@
 //! ISO 32000-2:2020 Section 14.7 (Logical Structure) and
 //! ISO 14289-1:2014 (PDF/UA).
 
+pub mod auto_tag;
 pub mod structure_builder;
 mod structure_tree;
 mod validation;

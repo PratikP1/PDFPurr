@@ -7,28 +7,24 @@
 [![docs.rs](https://docs.rs/pdfpurr/badge.svg)](https://docs.rs/pdfpurr)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg)](LICENSE)
 
-PDFPurr reads, writes, edits, renders, OCRs, and validates PDF documents in Rust. It supports PDF 1.0 through 2.0 with accessibility (PDF/UA), archival (PDF/A), and print production (PDF/X) standards.
+PDFPurr reads, writes, edits, renders, OCRs, and validates PDF documents in Rust. It handles PDF 1.0 through 2.0 with PDF/UA (accessibility), PDF/A (archival), and PDF/X (print production) standards.
 
-1000+ tests across unit, integration, adversarial, property-based, and fuzz testing. CI runs on Ubuntu, macOS, and Windows with nightly clippy and libFuzzer smoke tests.
+1150+ tests. CI on Ubuntu, macOS, and Windows with nightly clippy and libFuzzer smoke tests.
 
 ## Quick Start
 
-Add to your `Cargo.toml`:
-
 ```toml
 [dependencies]
-pdfpurr = "0.1"
+pdfpurr = "0.4"
 ```
 
 ```rust
 use pdfpurr::Document;
 
-// Create a new PDF
 let mut doc = Document::new();
 doc.add_page(612.0, 792.0).unwrap(); // US Letter
 let bytes = doc.to_bytes().unwrap();
 
-// Parse it back
 let doc = Document::from_bytes(&bytes).unwrap();
 assert_eq!(doc.page_count().unwrap(), 1);
 ```
@@ -37,380 +33,242 @@ assert_eq!(doc.page_count().unwrap(), 1);
 
 ### Reading and Parsing
 
-PDFPurr parses any PDF from 1.0 to 2.0, including encrypted and malformed files.
+Parses any PDF from 1.0 to 2.0, including encrypted and malformed files.
 
 ```rust
 use pdfpurr::Document;
 
-// Open from disk
 let doc = Document::open("report.pdf").unwrap();
-
-// Parse from bytes
-let data = std::fs::read("report.pdf").unwrap();
 let doc = Document::from_bytes(&data).unwrap();
-
-// Open an encrypted PDF
 let doc = Document::from_bytes_with_password(&data, b"secret").unwrap();
-
-// Lazy loading (parse objects on demand — fast for large files)
-let doc = Document::from_bytes_lazy(&data).unwrap();
-
-// Memory-mapped file (OS pages in data on demand)
-let doc = Document::open_mmap("large_report.pdf").unwrap();
-
-// Basic document info
-println!("Pages: {}", doc.page_count().unwrap());
-println!("Objects: {}", doc.object_count());
-if let Some(title) = doc.title() {
-    println!("Title: {}", title);
-}
+let doc = Document::from_bytes_lazy(&data).unwrap();     // parse on demand
+let doc = Document::open_mmap("large.pdf").unwrap();      // memory-mapped
 ```
 
-**Supported encryption:** Standard security handler revisions R2 through R6 (RC4 40/128-bit, AES-128, AES-256).
+**Encryption:** R2 through R6 (RC4 40/128-bit, AES-128, AES-256). Constant-time password comparison.
 
-**Repair:** If the cross-reference table is corrupt, PDFPurr automatically rebuilds it by scanning for object definitions. Streams with incorrect `/Length` values are recovered by scanning for `endstream`.
+**Repair:** Rebuilds corrupt xref tables by scanning for object definitions. Recovers streams with wrong `/Length` via `endstream` scanning. Falls back to raw deflate when zlib headers are corrupt.
 
 ### Text Extraction
 
-Extract text from individual pages or the entire document.
-
 ```rust
-use pdfpurr::Document;
-
-let doc = Document::open("paper.pdf").unwrap();
-
-// Single page
 let text = doc.extract_page_text(0).unwrap();
-println!("Page 1: {}", text);
-
-// All pages
 let all_text = doc.extract_all_text().unwrap();
-println!("{}", all_text);
 ```
 
-Text extraction uses font encoding tables (WinAnsiEncoding, MacRomanEncoding, PDFDocEncoding) and ToUnicode CMaps for accurate character mapping, including CJK scripts.
+Uses font encoding tables (WinAnsi, MacRoman, PDFDoc) and ToUnicode CMaps. CJK scripts supported.
+
+### Structure Detection
+
+Detects headings, paragraphs, lists, tables, and code blocks from font metrics and text positions — no OCR needed for native text.
+
+```rust
+use pdfpurr::content::structure_detection::BlockRole;
+
+let blocks = doc.analyze_page_structure(0).unwrap();
+for block in &blocks {
+    match &block.role {
+        BlockRole::Heading(level) => println!("H{level}: {}", block.runs[0].text),
+        BlockRole::Paragraph => println!("P: {} chars", block.runs.len()),
+        BlockRole::ListItem => println!("LI: {}", block.runs[0].text),
+        BlockRole::Code => println!("Code block"),
+        _ => {}
+    }
+}
+```
+
+Also detects tables (column alignment), headers/footers (repeated across pages), form field labels (proximity), and figure captions.
+
+### Auto-Tagging
+
+Adds a PDF/UA structure tree to untagged PDFs based on detected content structure.
+
+```rust
+let blocks_tagged = doc.auto_tag("en-US").unwrap();
+println!("Tagged {} blocks", blocks_tagged);
+```
+
+### Accessibility Checking
+
+Reports issues by comparing detected structure against existing tags.
+
+```rust
+let issues = doc.check_accessibility();
+for issue in &issues {
+    println!("[{}] {}: {}", issue.severity, issue.description, issue.suggestion);
+}
+```
+
+Detects: untagged documents, missing language, heading count mismatches, missing alt text on figures, heading level skips (H1 → H3 without H2).
 
 ### OCR for Image-Only PDFs
 
-Make scanned documents searchable and accessible. Three engines available — Windows OCR and Tesseract work out of the box with no feature flags.
+Three engines. Windows OCR and Tesseract need no feature flags.
 
-**Windows OCR (recommended on Windows, ~95% accuracy, zero dependencies):**
 ```rust
-use pdfpurr::Document;
-use pdfpurr::ocr::{OcrConfig, OcrEngine};
+// Windows OCR (~95% accuracy, zero dependencies)
 use pdfpurr::ocr::windows_engine::WindowsOcrEngine;
-
 let engine = WindowsOcrEngine::new();
-let mut doc = Document::open("scanned.pdf").unwrap();
 doc.ocr_all_pages(&engine, &OcrConfig::default()).unwrap();
-doc.save("searchable.pdf").unwrap();
+
+// Tesseract (~85-89%, requires tesseract CLI)
+use pdfpurr::ocr::tesseract_engine::TesseractEngine;
+let engine = TesseractEngine::new("eng");
+
+// ocrs (pure Rust, Latin only, requires "ocr" feature)
+use pdfpurr::ocr::ocrs_engine::OcrsEngine;
+let engine = OcrsEngine::new("det.rten", "rec.rten").unwrap();
 ```
 
-**Tesseract (~85-89% accuracy, requires `tesseract` CLI):**
-```rust
-use pdfpurr::ocr::tesseract_engine::TesseractEngine;
+Invisible text overlay (rendering mode 3) with tagged structure for screen readers. Full Unicode via ToUnicode CMap — CJK, emoji, and symbols preserved.
 
-let engine = TesseractEngine::new("eng");
-if engine.is_available() {
-    doc.ocr_all_pages(&engine, &OcrConfig::default()).unwrap();
+### Hybrid OCR + Text Comparison
+
+Compares content stream text against OCR output. When they disagree, presents both to screen readers.
+
+```rust
+let result = doc.hybrid_ocr_page(0, &engine, &config).unwrap();
+match result.source {
+    TextSource::ContentStream => println!("Text is reliable"),
+    TextSource::Ocr => println!("OCR is better"),
+    TextSource::Both => println!("Disagreement: {}", result.accessible_text),
+    TextSource::Neither => println!("No text found"),
 }
 ```
 
-**ocrs (pure Rust, Latin only, requires `ocr` feature):**
+### Text Run Analysis
+
+Extracts positioned text runs with font name, size, position, color, and style flags.
+
 ```rust
-use pdfpurr::ocr::ocrs_engine::OcrsEngine;  // requires "ocr" feature
-
-let engine = OcrsEngine::new("text-detection.rten", "text-recognition.rten").unwrap();
-doc.ocr_all_pages(&engine, &OcrConfig::default()).unwrap();
+let runs = doc.extract_text_runs(0).unwrap();
+for run in &runs {
+    println!("{} at ({:.0}, {:.0}) {}pt {}{}",
+        run.text, run.x, run.y, run.font_size,
+        if run.is_bold { "bold " } else { "" },
+        if run.is_italic { "italic" } else { "" },
+    );
+}
 ```
-
-All engines overlay invisible text (rendering mode 3) with tagged PDF structure (`<Document>`, `<H1>`–`<H6>`, `<P>`) for screen reader accessibility.
 
 ### Image Extraction
 
-Extract images from any page.
-
 ```rust
-use pdfpurr::Document;
-
-let doc = Document::open("brochure.pdf").unwrap();
-
-// All images across all pages
 let images = doc.extract_all_images().unwrap();
-for (page_idx, name, image) in &images {
-    println!(
-        "Page {}: {} ({}x{}, {:?})",
-        page_idx, name, image.width, image.height, image.color_space
-    );
+for (page, name, img) in &images {
+    println!("Page {page}: {name} ({}x{})", img.width, img.height);
 }
-
-// Images from a specific page
-let page = doc.get_page(0).unwrap();
-let page_images = doc.page_images(page);
 ```
 
-Supported filters: FlateDecode, DCTDecode (JPEG), JPXDecode (JPEG2000), CCITTFaxDecode, LZWDecode, ASCIIHexDecode, ASCII85Decode, RunLengthDecode.
+Extracts both XObject images and inline images (BI/ID/EI). Filters: FlateDecode, DCT, JPX, CCITT, LZW, ASCII85, ASCIIHex, RunLength.
 
 ### Metadata
 
-Read document metadata from both the Info dictionary and XMP streams.
-
 ```rust
-use pdfpurr::Document;
-
-let doc = Document::open("report.pdf").unwrap();
 let meta = doc.metadata();
-
-if let Some(title) = &meta.title { println!("Title: {}", title); }
-if let Some(author) = &meta.author { println!("Author: {}", author); }
-if let Some(subject) = &meta.subject { println!("Subject: {}", subject); }
-if let Some(creator) = &meta.creator { println!("Creator: {}", creator); }
-if let Some(producer) = &meta.producer { println!("Producer: {}", producer); }
-if let Some(date) = &meta.creation_date { println!("Created: {}", date); }
+if let Some(title) = &meta.title { println!("Title: {title}"); }
 ```
 
-XMP metadata is parsed with namespace-aware XML processing, supporting `rdf:Alt`/`rdf:Seq` containers and `rdf:Description` attribute forms.
+Reads Info dictionary and XMP streams.
 
-### Outlines (Bookmarks)
-
-Read the document outline tree, including actions and styling.
+### Outlines, Annotations, Form Fields, Signatures
 
 ```rust
-use pdfpurr::Document;
-
-let doc = Document::open("book.pdf").unwrap();
 let outlines = doc.outlines();
-
-for outline in &outlines {
-    println!("{}", outline.title);
-    if let Some(uri) = &outline.uri {
-        println!("  Link: {}", uri);
-    }
-    if outline.is_bold() { println!("  [bold]"); }
-    for child in &outline.children {
-        println!("  - {}", child.title);
-    }
-}
-```
-
-### Annotations
-
-Extract annotations from pages with full metadata.
-
-```rust
-use pdfpurr::Document;
-
-let doc = Document::open("annotated.pdf").unwrap();
-let page = doc.get_page(0).unwrap();
-let annotations = doc.page_annotations(page);
-
-for annot in &annotations {
-    println!("{} at {:?}", annot.subtype, annot.rect);
-    if let Some(uri) = &annot.uri { println!("  URI: {}", uri); }
-    if let Some(author) = &annot.author { println!("  Author: {}", author); }
-    if !annot.quad_points.is_empty() {
-        println!("  QuadPoints: {} values", annot.quad_points.len());
-    }
-}
+let annots = doc.page_annotations(page);
+let fields = doc.form_fields();
+let sigs = doc.signatures();
 ```
 
 ### Page Rendering
 
-Render PDF pages to pixel images using the tiny-skia backend.
-
 ```rust
-use pdfpurr::{Document, Renderer, RenderOptions};
-
-let doc = Document::open("slides.pdf").unwrap();
-let renderer = Renderer::new(&doc, RenderOptions {
-    dpi: 150.0,
-    background: [255, 255, 255, 255],
-});
-
+use pdfpurr::{Renderer, RenderOptions};
+let renderer = Renderer::new(&doc, RenderOptions { dpi: 150.0, ..Default::default() });
 let pixmap = renderer.render_page(0).unwrap();
-pixmap.save_png("page1.png").unwrap();
 ```
 
-The renderer supports the full ISO 32000-2 content stream operator set including annotation appearance streams.
-
-### Creating PDFs
-
-Build new PDF documents from scratch.
+### Creating and Manipulating PDFs
 
 ```rust
-use pdfpurr::Document;
-
 let mut doc = Document::new();
-doc.add_page(612.0, 792.0).unwrap(); // US Letter
-doc.add_page(595.0, 842.0).unwrap(); // A4
-doc.save("output.pdf").unwrap();
-```
-
-### Page Manipulation
-
-Merge, split, reorder, rotate, and remove pages.
-
-```rust
-use pdfpurr::Document;
-
-let mut doc = Document::open("report.pdf").unwrap();
+doc.add_page(612.0, 792.0).unwrap();
 doc.rotate_page(0, 90).unwrap();
-doc.remove_page(2).unwrap();
-doc.reorder_pages(&[2, 0, 1]).unwrap();
-
-let other = Document::open("appendix.pdf").unwrap();
-doc.merge(&other).unwrap();
-doc.save("combined.pdf").unwrap();
+doc.merge(&other_doc).unwrap();
+doc.save("output.pdf").unwrap();
 ```
 
 ### Font Embedding
 
-Embed TrueType and OpenType fonts with automatic subsetting.
+TTF, OTF/CFF, and variable fonts with automatic subsetting.
 
 ```rust
-use pdfpurr::EmbeddedFont;
-
-let font_data = std::fs::read("fonts/Roboto-Regular.ttf").unwrap();
-let font = EmbeddedFont::from_ttf(&font_data).unwrap();
+let font = EmbeddedFont::from_ttf(&data).unwrap();
 let subset = font.subset(&['H', 'e', 'l', 'o']).unwrap();
 
-// Variable font support
-let bold = EmbeddedFont::from_ttf_with_axes(&font_data, &[("wght", 700.0)]).unwrap();
-
-// CJK text via CidFont
-use pdfpurr::CidFont;
-let cjk = CidFont::from_ttf(&std::fs::read("NotoSansCJK.ttf").unwrap()).unwrap();
-```
-
-### Form Fields
-
-Read and fill AcroForm fields.
-
-```rust
-use pdfpurr::Document;
-
-let mut doc = Document::open("form.pdf").unwrap();
-for field in doc.form_fields() {
-    println!("{}: {:?} = {:?}", field.name, field.field_type, field.value);
-}
-doc.set_form_field("username", "alice").unwrap();
-doc.save("filled_form.pdf").unwrap();
-```
-
-### Digital Signatures
-
-Parse and verify digital signature integrity.
-
-```rust
-use pdfpurr::Document;
-
-let doc = Document::open("signed.pdf").unwrap();
-for sig in doc.signatures() {
-    println!("Filter: {}", sig.filter);
-    if let Some(name) = &sig.name { println!("Signer: {}", name); }
-}
+let otf = EmbeddedFont::from_otf(&otf_data).unwrap(); // CFF outlines
+let bold = EmbeddedFont::from_ttf_with_axes(&data, &[("wght", 700.0)]).unwrap();
 ```
 
 ### Standards Validation
 
-Validate documents against PDF/A, PDF/X, and PDF/UA standards.
-
 ```rust
-use pdfpurr::{Document, PdfALevel};
-
-let doc = Document::open("archive.pdf").unwrap();
 let report = doc.validate_pdfa(PdfALevel::A2b);
-println!("PDF/A-2b compliant: {}", report.is_compliant());
-
 let a11y = doc.accessibility_report();
-println!("Accessible: {}", a11y.is_compliant());
 ```
 
-### Linearized PDF Writing
-
-Write PDFs optimized for progressive web display (Fast Web View).
+### Linearized Writing and Incremental Updates
 
 ```rust
-use pdfpurr::Document;
-
-let mut doc = Document::new();
-doc.add_page(612.0, 792.0).unwrap();
 let linearized = doc.to_linearized_bytes().unwrap();
-```
-
-### Incremental Updates
-
-Append changes without rewriting the original file, preserving digital signatures.
-
-```rust
-use pdfpurr::Document;
-
-let original = std::fs::read("signed_contract.pdf").unwrap();
-let mut doc = Document::from_bytes(&original).unwrap();
-doc.set_form_field("status", "approved").unwrap();
-let updated = doc.to_incremental_update(&original).unwrap();
-std::fs::write("approved.pdf", &updated).unwrap();
+let incremental = doc.to_incremental_update(&original_bytes).unwrap();
 ```
 
 ## Feature Flags
 
 | Feature | Default | Description |
 |---------|---------|-------------|
-| `jpeg2000` | Yes | JPEG2000 decoding via openjpeg (C dependency) |
+| `jpeg2000` | Yes | JPEG2000 decoding (C dependency via openjpeg) |
 | `ocr` | No | Adds ocrs engine (pure Rust, Latin text) |
+| `ocr-windows-native` | No | Native Windows OCR via WinRT (Windows 10+) |
 
-Windows OCR and Tesseract engines are **always available** — no feature flag needed.
+Windows OCR (subprocess) and Tesseract are always available.
 
 ```toml
-# Default (no ocrs engine)
-pdfpurr = "0.2"
-
-# With ocrs pure-Rust engine
-pdfpurr = { version = "0.2", features = ["ocr"] }
+pdfpurr = "0.4"
+pdfpurr = { version = "0.4", features = ["ocr"] }
 ```
 
 ## Architecture
 
 ```
-pdfpurr/
-  src/
-    core/             PDF object model, filters, compression
-    parser/           Lexer, object parser, xref, repair
-    content/          Content stream tokenizer and builder
-    fonts/            Font parsing, encoding, embedding, subsetting, variable fonts
-    images/           Image extraction and embedding
-    rendering/        Page-to-pixel engine (tiny-skia), annotation rendering
-    encryption/       Standard security handler (R2-R6, RC4, AES-128/256)
-    forms/            AcroForms (read/write)
-    signatures/       Digital signature parsing and verification
-    standards/        PDF/A, PDF/X validation
-    accessibility/    PDF/UA, tagged PDF, structure tree, structure builder
-    structure/        Outlines, annotations, metadata
-    ocr/              OCR engines, text layer, layout analysis, preprocessing
-    document.rs       High-level API (open, parse, lazy, mmap, write, OCR)
-    page_builder.rs   Page creation API
-    error.rs          Error types
-  tests/
-    adversarial_tests.rs  Edge-case and malformed PDF tests (22)
-    corpus_tests.rs       Real-world PDF corpus (33 files)
-    external_corpus_tests.rs  veraPDF, qpdf fuzz, BFO tests
-    integration.rs        Write-path roundtrip tests (25)
-    proptest_fuzz.rs      Property-based fuzzing (18 targets)
-  fuzz/               cargo-fuzz targets (document, content stream, object)
-  benches/            Criterion benchmarks (parser, tokenizer, renderer)
+src/
+  core/               Object model, filters, compression
+  parser/             Lexer, object parser, xref, repair
+  content/            Tokenizer, builder, text analysis, structure detection
+  fonts/              Parsing, encoding, embedding, subsetting
+  images/             Extraction and embedding (XObject + inline)
+  rendering/          Page-to-pixel (tiny-skia), annotation rendering
+  encryption/         R2-R6, RC4, AES-128/256, constant-time comparison
+  forms/              AcroForms (read/write)
+  signatures/         Digital signature parsing
+  standards/          PDF/A, PDF/X validation
+  accessibility/      PDF/UA, structure tree, auto-tagging, quality checks
+  structure/          Outlines, annotations, metadata
+  ocr/                OCR engines, text layer, hybrid comparison
+  document.rs         High-level API
 ```
 
 ## Testing
 
 ```bash
-cargo test                       # all tests
-cargo bench                      # Criterion benchmarks
-cargo clippy -- -D warnings      # Lint check (clean on stable and nightly)
-cargo fmt --check                # Format check
-cargo doc --no-deps              # Build documentation (zero warnings)
+cargo test            # 1150+ tests
+cargo bench           # Criterion benchmarks
+cargo clippy          # Lint (clean on stable + nightly)
+cargo doc --no-deps   # Docs (zero warnings)
 ```
 
-CI runs automatically on every push: Ubuntu/Windows/macOS (stable), Ubuntu nightly, Criterion benchmarks, and 120 seconds of fuzz testing across 3 targets. On-demand corpus testing against 1800+ external PDFs available via GitHub Actions.
+CI: Ubuntu/Windows/macOS (stable) + nightly + fuzz + benchmarks. On-demand: 1800+ external PDFs from veraPDF, qpdf, BFO.
 
 ## Performance
 
@@ -419,14 +277,16 @@ CI runs automatically on every push: Ubuntu/Windows/macOS (stable), Ubuntu night
 | Parse 14-page PDF (1 MB) | 26 ms |
 | Text extraction per page | 4.7 ms |
 | Render page at 150 DPI | 210 ms |
-| Create new Document | < 1 us |
 
 ## Security
 
 - Zero `panic!` or `unreachable!()` in production code
-- Checked arithmetic on all image dimensions and buffer allocations
-- Resource limits: 256MB decoded stream max, 1M xref rebuild cap
-- Depth limits on recursive structures (page tree, outlines, inherited properties)
+- Constant-time password hash comparison
+- Checked arithmetic on image dimensions and buffer allocations
+- Resource limits: 256 MB decoded stream max, 1M xref rebuild cap
+- Depth limits: page tree (64), outlines (32), inherited properties (32)
+- Cycle detection on outline /Next chains
+- Raw deflate fallback for corrupt zlib headers
 - Fuzz-tested: 3 cargo-fuzz + 18 proptest + 22 adversarial tests
 
 ## License

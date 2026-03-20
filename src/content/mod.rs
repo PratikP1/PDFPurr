@@ -5,8 +5,10 @@
 //! tokenization and interpretation of content streams, as well as a builder
 //! for generating new content streams programmatically.
 
+pub mod analysis;
 pub mod builder;
 pub mod operators;
+pub mod structure_detection;
 pub mod text;
 
 pub use builder::{ContentStreamBuilder, TextItem};
